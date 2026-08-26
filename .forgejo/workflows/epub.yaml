@@ -51,3 +51,35 @@ jobs:
           fi
           git commit -m "build: rebuild EPUB from ${GITHUB_SHA::8}" -- Microservices-in-Go.epub
           git push origin HEAD:main
+
+      - name: Publish the EPUB as a release
+        env:
+          TOKEN: ${{ secrets.EPUB_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+          API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+          TAG: latest
+        # A single rolling release holds the current EPUB. Forgejo pins a tag
+        # when the release is created and will not move it, so replace both.
+        run: |
+          set -euo pipefail
+          auth=(-sS -H "Authorization: token ${TOKEN}")
+
+          id=$(curl "${auth[@]}" "${API}/releases/tags/${TAG}" | jq -r '.id // empty')
+          if [ -n "$id" ]; then
+            curl "${auth[@]}" -X DELETE "${API}/releases/${id}"
+            curl "${auth[@]}" -X DELETE "${API}/tags/${TAG}" || true
+          fi
+
+          id=$(curl "${auth[@]}" -X POST "${API}/releases" \
+                 -H 'Content-Type: application/json' \
+                 -d "$(jq -n --arg tag "$TAG" --arg sha "$(git rev-parse HEAD)" \
+                        '{tag_name: $tag,
+                          target_commitish: $sha,
+                          name: "Microservices in Go — current EPUB",
+                          body: ("Built from `" + $sha[0:8] + "`.")}')" \
+               | jq -r '.id // empty')
+          [ -n "$id" ] || { echo "Could not create release ${TAG}."; exit 1; }
+
+          curl "${auth[@]}" --fail-with-body -X POST \
+            -F attachment=@Microservices-in-Go.epub \
+            "${API}/releases/${id}/assets?name=Microservices-in-Go.epub" >/dev/null
+          echo "Published release ${TAG} (id ${id})."

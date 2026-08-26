@@ -34,8 +34,8 @@ This produces `Microservices-in-Go.epub`. Convert onward to PDF or HTML with
 Pandoc as well, e.g. `pandoc … -o book.html`.
 
 Pushing a change under `files/` to `main` also triggers `.forgejo/workflows/epub.yaml`,
-which runs this same script and commits the rebuilt `Microservices-in-Go.epub`
-back to the repository root.
+which runs this same script, commits the rebuilt `Microservices-in-Go.epub`
+back to the repository root, and attaches it to the rolling `latest` release.
 
 ## Provenance
 
