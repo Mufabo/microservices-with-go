@@ -1,0 +1,39 @@
+# ArgoCD Application for Snapvault.
+#
+# In a GitOps setup the rendered manifests live in a SEPARATE config repository
+# (e.g. snapvault-config) that ArgoCD watches; CI commits new image tags there
+# rather than running kubectl. This file points ArgoCD at the prod overlay in
+# that repo. Apply it once into the argocd namespace:
+#
+#   kubectl apply -n argocd -f deploy/k8s/argocd-application.yaml
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: snapvault
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # Point this at your config repo. For a single-repo trial you can instead
+    # use this repo's deploy/k8s/overlays/prod path.
+    repoURL: https://codeberg.org/example/snapvault-config.git
+    targetRevision: main
+    path: overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: snapvault
+  syncPolicy:
+    automated:
+      prune: true     # delete resources removed from git
+      selfHeal: true  # revert manual drift back to git
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  # The HPA owns each Deployment's replica count at runtime. Without this,
+  # ArgoCD would see the live replica count as drift and fight the autoscaler.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

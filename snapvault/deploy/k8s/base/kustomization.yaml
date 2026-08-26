@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base resources, environment-agnostic. Overlays set the namespace, image tags,
+# bucket name, autoscaling, and the Workload Identity binding.
+resources:
+  - serviceaccount.yaml
+  - config.yaml
+  - gateway.yaml
+  - images.yaml
+  - thumbnails.yaml
+  - metadata.yaml
+  - feed.yaml

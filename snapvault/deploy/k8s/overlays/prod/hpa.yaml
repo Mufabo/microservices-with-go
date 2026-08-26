@@ -1,0 +1,48 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: thumbnails
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: thumbnails
+  minReplicas: 1
+  maxReplicas: 8
+  metrics:
+    # Thumbnailing is CPU-bound, so CPU utilization is a good scaling signal.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Alternatively, scale on the JetStream consumer's pending-message count
+    # via an external metric (requires the custom-metrics Stackdriver adapter):
+    #
+    # - type: External
+    #   external:
+    #     metric:
+    #       name: custom.googleapis.com|nats|consumer|num_pending
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "30"

@@ -1,0 +1,4 @@
+project_id     = "my-gcp-project"
+region         = "europe-west1"
+forgejo_repo   = "example/snapvault"
+forgejo_issuer = "https://codeberg.org/api/actions"

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: snapvault-config
+data:
+  NATS_URL: "nats://nats:4222"
+  STORAGE: "gcs"
+  # GCS_BUCKET is set per-environment in the overlay.
+  MONGO_DB: "snapvault"
+  IMAGES_URL: "http://images:8080"
+  METADATA_URL: "http://metadata:8080"
+  FEED_URL: "http://feed:8080"
+  LOG_LEVEL: "info"
+# Secrets (MONGO_URI, DATABASE_URL, and GOOGLE_CLOUD_PROJECT if used) are NOT in
+# git. In production they come from Secret Manager via the CSI driver; the
+# Terraform in ../../infra provisions them. For a quick cluster test you can
+# create them manually, e.g.:
+#
+#   kubectl create secret generic snapvault-secrets \
+#     --from-literal=MONGO_URI='mongodb://...' \
+#     --from-literal=DATABASE_URL='postgres://...'

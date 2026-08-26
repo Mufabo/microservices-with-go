@@ -1,0 +1,28 @@
+---
+title:
+- type: main
+  text: Microservices in Go
+- type: subtitle
+  text: Building Cloud-Native Systems with NATS and Google Cloud
+creator:
+- role: author
+  text: Written with Claude (Anthropic)
+publisher: Independently produced
+date: '2026'
+lang: en-US
+identifier:
+  scheme: UUID
+  text: urn:uuid:a64f534c-cfc5-426f-8bf3-31e3c4c3b18a
+rights: >-
+  This is an original, independently written work created as a learning
+  resource. It is not affiliated with, endorsed by, or derived from any
+  other book or publisher. You are free to read, copy, and share it for
+  personal and educational use.
+description: >-
+  A hands-on guide to building a complete microservices system from scratch
+  using Go 1.26, NATS for messaging, and Google Cloud for deployment. Covers
+  HTTP services, Docker, Docker Compose, MongoDB and PostgreSQL, asynchronous
+  messaging with NATS JetStream, testing, CI/CD, Kubernetes on GKE, packaging
+  with Helm, infrastructure as code with Terraform, observability, and production
+  operations.
+...

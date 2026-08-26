@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ---- test: runs on Codeberg's hosted runners ----
+  test:
+    runs-on: docker
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-latest
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go vet ./...
+      # Unit tests only. The integration tests are behind `//go:build
+      # integration` and need Docker (Testcontainers); run them on a
+      # self-hosted runner with `go test -tags=integration ./...`.
+      - run: go test -race ./...
+
+  # ---- build: push one image per service ----
+  build:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    # Building images needs Docker. Codeberg's hosted runners do not provide
+    # Docker-in-Docker, so register a self-hosted runner for this job (or use
+    # Codeberg's Woodpecker CI) and adjust the label accordingly.
+    runs-on: docker
+    strategy:
+      matrix:
+        service: [gateway, images, thumbnails, metadata, feed]
+    # Forgejo issues a short-lived OIDC token for this job — the equivalent of
+    # GitHub Actions' `permissions: id-token: write`.
+    enable-openid-connect: true
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (keyless, via OIDC)
+        uses: https://github.com/google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - uses: https://github.com/google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/snapvault/${{ matrix.service }}"
+          docker build --build-arg SERVICE=${{ matrix.service }} -t "$IMAGE:${{ github.sha }}" .
+          docker push "$IMAGE:${{ github.sha }}"
+
+  # ---- promote: update the GitOps config repo; ArgoCD does the deploy ----
+  promote:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: docker
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-latest
+    steps:
+      - name: Check out the config repo
+        uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          repository: example/snapvault-config
+          token: ${{ secrets.CONFIG_REPO_TOKEN }}
+          path: config
+
+      - name: Install kustomize
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Pin new image tags
+        working-directory: config/overlays/prod
+        run: |
+          REG="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/snapvault"
+          for svc in gateway images thumbnails metadata feed; do
+            kustomize edit set image snapvault/$svc=$REG/$svc:${{ github.sha }}
+          done
+
+      - name: Commit and push
+        working-directory: config
+        run: |
+          git config user.name "snapvault-ci"
+          git config user.email "ci@snapvault.example"
+          git commit -am "deploy: ${{ github.sha }}"
+          git push

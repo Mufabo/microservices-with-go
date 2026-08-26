@@ -1,0 +1,23 @@
+# Build output
+/bin/
+/out/
+*.exe
+
+# Local data (disk storage backend)
+/data/
+*.local
+
+# Env files with secrets
+.env
+*.tfvars
+!*.tfvars.example
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

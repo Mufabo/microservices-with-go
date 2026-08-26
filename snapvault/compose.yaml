@@ -1,0 +1,100 @@
+name: snapvault
+
+# Local development stack: the five services plus their backing systems. Only
+# the gateway is published to the host. The `restart` policy lets services that
+# start before NATS/Postgres/Mongo are ready retry until the dependency is up.
+
+services:
+  nats:
+    image: nats:2.10
+    command: ["-js"] # enable JetStream
+    ports:
+      - "4222:4222"
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: snapvault
+      POSTGRES_PASSWORD: snapvault
+      POSTGRES_DB: snapvault
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  images:
+    build:
+      context: .
+      args:
+        SERVICE: images
+    environment:
+      NATS_URL: nats://nats:4222
+      STORAGE: disk
+      DATA_DIR: /data
+    volumes:
+      - blob-data:/data # shared with thumbnails so it can read originals
+    depends_on: [nats]
+    restart: unless-stopped
+
+  thumbnails:
+    build:
+      context: .
+      args:
+        SERVICE: thumbnails
+    environment:
+      NATS_URL: nats://nats:4222
+      STORAGE: disk
+      DATA_DIR: /data
+    volumes:
+      - blob-data:/data
+    depends_on: [nats]
+    restart: unless-stopped
+
+  metadata:
+    build:
+      context: .
+      args:
+        SERVICE: metadata
+    environment:
+      NATS_URL: nats://nats:4222
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: snapvault
+    depends_on: [nats, mongo]
+    restart: unless-stopped
+
+  feed:
+    build:
+      context: .
+      args:
+        SERVICE: feed
+    environment:
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgres://snapvault:snapvault@postgres:5432/snapvault?sslmode=disable
+    depends_on: [nats, postgres]
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      args:
+        SERVICE: gateway
+    environment:
+      IMAGES_URL: http://images:8080
+      FEED_URL: http://feed:8080
+      METADATA_URL: http://metadata:8080
+    ports:
+      - "8080:8080"
+    depends_on: [images, feed, metadata]
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  pg-data:
+  blob-data:

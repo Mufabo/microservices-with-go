@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: snapvault
+
+resources:
+  - ../../base
+  - hpa.yaml
+  - pdb.yaml
+
+# CI updates these tags in the config repo with:
+#   kustomize edit set image snapvault/<svc>=<registry>/<svc>:<sha>
+# Replace REGION and PROJECT_ID to match your Artifact Registry.
+images:
+  - name: snapvault/gateway
+    newName: REGION-docker.pkg.dev/PROJECT_ID/snapvault/gateway
+    newTag: latest
+  - name: snapvault/images
+    newName: REGION-docker.pkg.dev/PROJECT_ID/snapvault/images
+    newTag: latest
+  - name: snapvault/thumbnails
+    newName: REGION-docker.pkg.dev/PROJECT_ID/snapvault/thumbnails
+    newTag: latest
+  - name: snapvault/metadata
+    newName: REGION-docker.pkg.dev/PROJECT_ID/snapvault/metadata
+    newTag: latest
+  - name: snapvault/feed
+    newName: REGION-docker.pkg.dev/PROJECT_ID/snapvault/feed
+    newTag: latest
+
+patches:
+  # Environment-specific bucket.
+  - target: { kind: ConfigMap, name: snapvault-config }
+    patch: |-
+      - op: add
+        path: /data/GCS_BUCKET
+        value: snapvault-uploads-prod
+  # Bind the Kubernetes SA to the Google SA for Workload Identity.
+  - target: { kind: ServiceAccount, name: snapvault }
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          iam.gke.io/gcp-service-account: snapvault@PROJECT_ID.iam.gserviceaccount.com
