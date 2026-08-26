@@ -1,0 +1,53 @@
+name: epub
+
+# Rebuild Microservices-in-Go.epub whenever the book source changes, and commit
+# the result back so the tracked EPUB never drifts from files/.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'files/**'
+      - '.forgejo/workflows/epub.yaml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: docker
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-latest
+    env:
+      # build.sh needs Pandoc 3.x; the distro package is 2.x, so install the
+      # upstream .deb. Bump this pin deliberately.
+      PANDOC_VERSION: "3.5"
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          # A repo-scoped token with write access, stored as a secret. Falls
+          # back to the token Forgejo issues for the job where that is allowed
+          # to push. checkout persists it, so `git push` below just works.
+          token: ${{ secrets.EPUB_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Install Pandoc
+        run: |
+          curl -sSfLO "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          apt-get install -y "./pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          rm "pandoc-${PANDOC_VERSION}-1-amd64.deb"
+
+      - name: Build the EPUB
+        # build.sh writes next to the sources; the published copy lives at the
+        # repo root.
+        run: |
+          cd files
+          ./build.sh
+          mv Microservices-in-Go.epub ..
+
+      - name: Commit the rebuilt EPUB
+        run: |
+          git config user.name "forgejo-actions"
+          git config user.email "forgejo-actions@noreply.codeberg.org"
+          if git diff --quiet -- Microservices-in-Go.epub; then
+            echo "EPUB unchanged; nothing to commit."
+            exit 0
+          fi
+          git commit -m "build: rebuild EPUB from ${GITHUB_SHA::8}" -- Microservices-in-Go.epub
+          git push origin HEAD:main
