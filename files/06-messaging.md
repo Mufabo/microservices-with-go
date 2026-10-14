@@ -268,7 +268,7 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
 }
 ```
 
-`owner` is whatever the client sends in the form --- there is no login, so nothing stops a client from claiming to be someone else. That's acceptable for learning the architecture; Chapter 14 comes back to what a real deployment needs.
+`owner` is whatever the client sends in the form --- there is no login, so nothing stops a client from claiming to be someone else. That's acceptable for learning the architecture; Chapter 14 replaces the form field with a verified user from Identity Platform.
 
 Publishing to a JetStream stream blocks until the broker has *persisted* the message and acknowledged it, so a successful `Publish` means the event is durably stored and will be delivered even if every consumer is currently down. The user's upload is complete and announced; the rest of the system will catch up on its own schedule.
 

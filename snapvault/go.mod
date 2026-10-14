@@ -9,6 +9,8 @@ go 1.26.0
 require (
 	cloud.google.com/go/storage v1.50.0
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.27.0
+	github.com/coreos/go-oidc/v3 v3.12.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/nats-io/nats.go v1.39.1
 	github.com/prometheus/client_golang v1.20.5

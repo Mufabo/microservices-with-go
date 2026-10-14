@@ -89,6 +89,9 @@ services:
       IMAGES_URL: http://images:8080
       FEED_URL: http://feed:8080
       METADATA_URL: http://metadata:8080
+      # Local only: no identity provider, every upload belongs to this user.
+      # Production sets AUTH_ISSUER and AUTH_AUDIENCE instead.
+      AUTH_DEV_USER: dev-user
     ports:
       - "8080:8080"
     depends_on: [images, feed, metadata]

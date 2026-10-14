@@ -29,12 +29,20 @@ images:
     newTag: latest
 
 patches:
-  # Environment-specific bucket.
+  # Environment-specific bucket, and the Identity Platform project whose ID
+  # tokens the gateway accepts (the `auth_issuer`/`auth_audience` Terraform
+  # outputs). Without these the gateway refuses to start.
   - target: { kind: ConfigMap, name: snapvault-config }
     patch: |-
       - op: add
         path: /data/GCS_BUCKET
         value: snapvault-uploads-prod
+      - op: add
+        path: /data/AUTH_ISSUER
+        value: https://securetoken.google.com/PROJECT_ID
+      - op: add
+        path: /data/AUTH_AUDIENCE
+        value: PROJECT_ID
   # Point the feed's Cloud SQL Auth Proxy at this environment's instance
   # (the `cloudsql_connection_name` Terraform output).
   - target: { kind: Deployment, name: feed }

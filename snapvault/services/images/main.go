@@ -88,10 +88,18 @@ func main() {
 	}
 }
 
-// upload accepts a multipart form with an "image" file and an "owner" field,
-// stores the original, and publishes images.uploaded.
+// upload accepts a multipart form with an "image" file, stores the original,
+// and publishes images.uploaded. The owner is the user the gateway verified,
+// passed in httpx.UserHeader; a request without it never came through the
+// gateway's authentication and is refused.
 func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 	log := httpx.LoggerFrom(r.Context(), s.log)
+
+	owner := r.Header.Get(httpx.UserHeader)
+	if owner == "" {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
@@ -104,11 +112,6 @@ func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-
-	owner := r.FormValue("owner")
-	if owner == "" {
-		owner = "anonymous"
-	}
 
 	id := newID()
 	objectName := "originals/" + id

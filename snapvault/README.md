@@ -41,7 +41,9 @@ are free to use, modify, and build on it.
 ```
 
 The **gateway** proxies uploads and image bytes and serves an aggregated
-image-detail view. The **images** service stores originals and announces
+image-detail view. It is also where users are authenticated: uploading requires
+an ID token from Google Identity Platform, and the gateway passes the verified
+user ID on to the images service as the image's owner. The **images** service stores originals and announces
 `images.uploaded`. The **thumbnails** worker consumes that event, resizes the
 image, and announces `images.thumbnailed`. The **metadata** service records a
 document per image. The **feed** service builds the public gallery, reacting to
@@ -62,6 +64,7 @@ asynchronously through NATS.
 | Infrastructure  | Terraform                                |
 | Delivery        | Forgejo Actions + ArgoCD (GitOps)        |
 | Observability   | OpenTelemetry traces, Prometheus metrics |
+| Identity        | Google Identity Platform (OIDC ID tokens) |
 
 ## Repository layout
 
@@ -73,7 +76,7 @@ internal/platform/          infrastructure, no domain logic
   messaging/natsutil/        NATS connect + stream setup
   metrics/  telemetry/       Prometheus + OpenTelemetry
 services/
-  gateway/                   edge: proxying + aggregation
+  gateway/                   edge: proxying, aggregation, authentication
   images/                    upload + serve + publish
   thumbnails/                background resize worker
   metadata/                  MongoDB-backed metadata + read API
@@ -82,7 +85,7 @@ migrations/                  SQL for the feed database
 deploy/k8s/base/             Kubernetes manifests
 deploy/k8s/overlays/prod/    prod Kustomize overlay (images, HPA, PDB, WI)
 deploy/k8s/argocd-application.yaml
-infra/                       Terraform (GCS, GKE, Cloud SQL, IAM, WIF, ArgoCD)
+infra/                       Terraform (GCS, GKE, Cloud SQL, IAM, WIF, ArgoCD, Identity Platform)
 .forgejo/workflows/ci.yaml   test → build → promote pipeline
 Dockerfile                   one parameterized build for every service
 compose.yaml                 local development stack
@@ -94,11 +97,7 @@ compose.yaml                 local development stack
 - Docker (with Compose) for the local stack and integration tests
 - For deployment: a Google Cloud project, `gcloud`, `kubectl`, and Terraform
 
-Generate `go.sum` once after cloning:
-
-```sh
-go mod tidy
-```
+`go.mod` and `go.sum` are committed; `go mod download` fetches dependencies.
 
 ## Run locally
 
@@ -106,11 +105,13 @@ go mod tidy
 docker compose up --build
 ```
 
-Then exercise it:
+Then exercise it. Locally the gateway runs in development mode
+(`AUTH_DEV_USER=dev-user` in `compose.yaml`), so uploads need no token and all
+belong to `dev-user`:
 
 ```sh
 # upload an image
-curl -F "image=@photo.jpg" -F "owner=alice" http://localhost:8080/api/images
+curl -F "image=@photo.jpg" http://localhost:8080/api/images
 # -> {"id":"<id>"}
 
 # the public feed (the thumbnail attaches a moment later)
@@ -121,6 +122,13 @@ curl http://localhost:8080/api/images/<id>
 
 # the generated thumbnail
 curl http://localhost:8080/thumbs/<id>.jpg --output thumb.jpg
+```
+
+Against a deployment with real authentication, send the ID token your client
+got from Identity Platform (the Firebase Auth SDK's `getIdToken()`):
+
+```sh
+curl -H "Authorization: Bearer $ID_TOKEN" -F "image=@photo.jpg" https://snapvault.example/api/images
 ```
 
 ## Tests
@@ -143,7 +151,7 @@ docker build --build-arg SERVICE=images -t snapvault/images .
 ## Deploy to Google Cloud
 
 1. **Provision infrastructure** (bucket, Artifact Registry, GKE Autopilot,
-   Cloud SQL, IAM, Workload Identity Federation, ArgoCD):
+   Cloud SQL, IAM, Workload Identity Federation, ArgoCD, Identity Platform):
 
    ```sh
    cd infra
@@ -153,7 +161,9 @@ docker build --build-arg SERVICE=images -t snapvault/images .
    ```
 
    Note the outputs (`wif_provider`, `deployer_service_account`,
-   `artifact_registry`, …) — the CI secrets use them.
+   `artifact_registry`, …) — the CI secrets use them. `auth_issuer` and
+   `auth_audience` go into the prod overlay's ConfigMap patch, and
+   `cloudsql_connection_name` into its Cloud SQL Auth Proxy patch.
 
 2. **Configure CI secrets** in your Forgejo repo: `GCP_WIF_PROVIDER`,
    `GCP_DEPLOYER_SA`, `GCP_PROJECT_ID`, `GCP_REGION`, and `CONFIG_REPO_TOKEN`.
@@ -187,6 +197,8 @@ never fights the Horizontal Pod Autoscaler.
 | `MONGO_URI`/`MONGO_DB` | metadata           | MongoDB connection (or `MONGO_URI_FILE`) |
 | `DATABASE_URL`         | feed               | PostgreSQL DSN (or `DATABASE_URL_FILE`)  |
 | `IMAGES_URL`/`FEED_URL`/`METADATA_URL` | gateway | upstream service addresses           |
+| `AUTH_ISSUER`/`AUTH_AUDIENCE` | gateway     | OIDC issuer and audience of accepted ID tokens |
+| `AUTH_DEV_USER`        | gateway            | local only: attribute every upload to this user |
 | `GOOGLE_CLOUD_PROJECT` | all                | enables Cloud Trace export when set      |
 | `LOG_LEVEL`            | all                | `debug` for verbose logs                 |
 

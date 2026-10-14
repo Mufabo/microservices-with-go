@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+// UserHeader carries the verified user ID from the gateway to internal
+// services. Internal services may trust it only because the gateway is the
+// sole public entry point, verifies the caller before setting it, and removes
+// any copy a client sends.
+const UserHeader = "X-Snapvault-User"
+
 // Serve runs h on addr and blocks until the process receives SIGINT or
 // SIGTERM, then drains in-flight requests before returning.
 func Serve(addr string, h http.Handler, log *slog.Logger) error {

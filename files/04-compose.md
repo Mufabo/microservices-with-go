@@ -4,7 +4,7 @@ One container is a program. A *system* is many containers that find each other, 
 
 ## A second service: the gateway
 
-So far Snapvault has one service. To have a system worth orchestrating we need at least two, and the natural next one is the **gateway** --- the single public front door through which the outside world reaches Snapvault. Everything else (images, thumbnails, metadata, feed) becomes an internal service that the gateway talks to; clients never address them directly. This is a deliberate and common pattern, sometimes called an *API gateway* or *backend for frontend*, and it buys us a lot: one place to terminate TLS, one natural place to add authentication (Snapvault doesn't implement it; Chapter 14 explains what a real deployment would need), one public IP to manage, and the freedom to rename, split, or move internal services without changing anything a client sees.
+So far Snapvault has one service. To have a system worth orchestrating we need at least two, and the natural next one is the **gateway** --- the single public front door through which the outside world reaches Snapvault. Everything else (images, thumbnails, metadata, feed) becomes an internal service that the gateway talks to; clients never address them directly. This is a deliberate and common pattern, sometimes called an *API gateway* or *backend for frontend*, and it buys us a lot: one place to terminate TLS, one place to authenticate users (Chapter 14 adds it), one public IP to manage, and the freedom to rename, split, or move internal services without changing anything a client sees.
 
 The gateway's first job is modest: serve a landing page and proxy image requests through to the images service. Create `services/gateway/main.go`:
 

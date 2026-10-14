@@ -19,3 +19,9 @@ variable "forgejo_issuer" {
   description = "OIDC issuer of the Forgejo instance."
   default     = "https://codeberg.org/api/actions"
 }
+
+variable "auth_authorized_domains" {
+  type        = list(string)
+  description = "Web origins allowed to sign users in with Identity Platform (your app's domain, plus localhost for development)."
+  default     = ["localhost"]
+}

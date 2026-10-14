@@ -40,6 +40,12 @@ func main() {
 	}
 	defer func() { _ = shutdown(ctx) }()
 
+	auth, err := newAuthFromEnv(ctx, log)
+	if err != nil {
+		log.Error("auth init", "err", err)
+		os.Exit(1)
+	}
+
 	imagesURL := mustURL(config.MustString("IMAGES_URL"))
 	feedURL := mustURL(config.MustString("FEED_URL"))
 	metaURL := config.MustString("METADATA_URL")
@@ -65,11 +71,13 @@ func main() {
 	mux.Handle("GET /images/{name}", imagesProxy)
 	mux.Handle("GET /thumbs/{name}", imagesProxy)
 
-	// Public JSON/upload API.
-	mux.HandleFunc("POST /api/images", func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = "/images"
-		imagesProxy.ServeHTTP(w, r)
-	})
+	// Public JSON/upload API. Reading is open to everyone; uploading requires
+	// a verified user, whose ID the images service records as the owner.
+	mux.Handle("POST /api/images", requireUser(auth, log,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = "/images"
+			imagesProxy.ServeHTTP(w, r)
+		})))
 	mux.HandleFunc("GET /api/feed", func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/feed"
 		feedProxy.ServeHTTP(w, r)
@@ -81,6 +89,7 @@ func main() {
 	httpx.Health(mux, nil)
 
 	var h http.Handler = mux
+	h = stripInternalHeaders(h)
 	h = metrics.Middleware(h)
 	h = httpx.RequestID(h)
 	h = otelhttp.NewHandler(h, "gateway")

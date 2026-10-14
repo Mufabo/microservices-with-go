@@ -31,3 +31,13 @@ output "cloudsql_connection_name" {
 output "gke_cluster" {
   value = google_container_cluster.autopilot.name
 }
+
+output "auth_issuer" {
+  description = "AUTH_ISSUER for the gateway: the issuer of Identity Platform ID tokens."
+  value       = "https://securetoken.google.com/${var.project_id}"
+}
+
+output "auth_audience" {
+  description = "AUTH_AUDIENCE for the gateway: Identity Platform ID tokens name the project ID as audience."
+  value       = var.project_id
+}

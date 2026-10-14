@@ -37,6 +37,8 @@ Snapvault ends up as five small services --- a public **gateway**, an **images**
   Charts                  **Helm**                    The cluster's package manager --- bundling the manifests into one versioned chart that installs, upgrades, and rolls back as a unit.
 
   Infrastructure          **Terraform**               The cloud itself, described as code you can review and re-create.
+
+  Identity                **Identity Platform**       Signs users in and issues standard OIDC tokens the gateway verifies, so Snapvault never stores a password.
   --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 You do not need prior experience with any of these except a working knowledge of Go (you should be comfortable with structs, interfaces, goroutines, and modules). Everything else is taught from first principles as you need it.
@@ -58,7 +60,7 @@ Read it in order, with a terminal open. The chapters form a single arc:
 11. **Infrastructure as code with Terraform** --- the cloud, reproducibly.
 12. **GitOps with ArgoCD** --- Git as the source of truth for what's deployed.
 13. **Observability** --- logs, metrics, and traces.
-14. **Going to production** --- scaling, security, and resilience.
+14. **Going to production** --- scaling, secrets, resilience, and user authentication.
 
 An appendix collects the commands and snippets you will reach for most often.
 

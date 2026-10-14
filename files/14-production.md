@@ -1,6 +1,6 @@
-# Chapter 14 --- Going to Production: Scaling, Secrets, and Resilience
+# Chapter 14 --- Going to Production: Scaling, Secrets, Resilience, and Identity
 
-Snapvault is deployed on a self-healing cluster, provisioned from code, and observable from end to end. That is a real system --- but "it runs" and "it's ready for production traffic" are different claims. Production means a surge of uploads on a Saturday afternoon doesn't tip the thumbnailer over. It means a database password isn't sitting in a manifest. It means that when the metadata service has a bad ten minutes, users still see their feed instead of an error page, and that the broker holding the whole system together isn't one Pod away from taking everything down. This final build chapter hardens Snapvault along exactly those lines: it scales on the signals we collected in Chapter 13, manages secrets properly, makes services and the broker resilient to partial failure, and finally delivers the gateway aggregation we've deferred since Chapter 4.
+Snapvault is deployed on a self-healing cluster, provisioned from code, and observable from end to end. That is a real system --- but "it runs" and "it's ready for production traffic" are different claims. Production means a surge of uploads on a Saturday afternoon doesn't tip the thumbnailer over. It means a database password isn't sitting in a manifest. It means that when the metadata service has a bad ten minutes, users still see their feed instead of an error page, and that the broker holding the whole system together isn't one Pod away from taking everything down. And it means knowing who uploaded each photo. This final build chapter hardens Snapvault along exactly those lines: it scales on the signals we collected in Chapter 13, manages secrets properly, makes services and the broker resilient to partial failure, delivers the gateway aggregation we've deferred since Chapter 4, and puts real user authentication at the gateway.
 
 ## Scaling with the load
 
@@ -315,9 +315,160 @@ spec:
 
 And **resource requests** --- already required by Autopilot --- deserve a deliberate pass now that you have real latency and CPU data from Chapter 13's metrics. Set requests from observed usage, not guesswork: too low and Pods get throttled or evicted under load; too high and you pay for idle capacity, since Autopilot bills on requests. Observability isn't only for incidents; it's the input to right-sizing, and right-sizing is most of cost control on Autopilot, where you pay per Pod for exactly what you request.
 
-## What we didn't build: identity
+## Who's uploading: identity at the gateway
 
-One production requirement this book deliberately leaves out deserves to be named plainly: **Snapvault has no authentication.** Anyone who can reach the gateway can upload, and `owner` is whatever the client types into a form field. That's fine for learning the architecture, and not fine for anything public. The gateway is where it belongs: verify a token there --- an OIDC ID token from an identity provider, or a session cookie --- derive `owner` from the verified identity instead of the request body, and pass it to the images service in a header that internal services trust *only* from the gateway. Add rate limiting per user at the same point, alongside the upload size limit from Chapter 5. None of this changes the architecture, which is exactly why the gateway exists: it's the one place the change has to be made.
+Since Chapter 6, `owner` has been whatever the client typed into a form field. Anyone who can reach the gateway can upload, as anyone. That was fine while we learned the architecture, and it's not fine for anything public. This is the change the gateway was built for back in Chapter 4: authentication happens in one place, at the edge, and nothing behind it has to learn how.
+
+### Who signs users in
+
+Snapvault doesn't store passwords, and shouldn't. Signing users in is the job of an **identity provider**, and on Google Cloud the one for an app's *public* users is **Identity Platform**, the managed form of Firebase Authentication. Users sign in with Google, email and password, or other providers, and the app receives an **ID token**: a JWT, signed by Google, that says who the user is.
+
+::: note
+**Identity Platform, not Cloud Identity.** The names are confusingly close. *Cloud Identity* manages an organization's own staff --- employee accounts, groups, their access to Google Cloud. *Identity Platform* handles sign-in for the people who use your app. Snapvault's users are the public, so Identity Platform is the one we want. If Snapvault were an internal tool for one company's employees, you'd use Cloud Identity accounts behind *Identity-Aware Proxy* instead, and write no sign-in code at all.
+:::
+
+Turning it on is more Terraform, in `infra/identity.tf`:
+
+``` hcl
+resource "google_project_service" "identitytoolkit" {
+  service            = "identitytoolkit.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_identity_platform_config" "default" {
+  project = var.project_id
+
+  sign_in {
+    email {
+      enabled           = true
+      password_required = true
+    }
+  }
+
+  # Web origins allowed to run the sign-in flow.
+  authorized_domains = var.auth_authorized_domains
+
+  depends_on = [google_project_service.identitytoolkit]
+}
+```
+
+That enables email-and-password sign-in. "Sign in with Google" additionally needs an OAuth client, which you create in the console and register with a `google_identity_platform_default_supported_idp_config` resource.
+
+The client side is the Firebase Auth SDK: the web or mobile app signs the user in, calls `getIdToken()`, and sends the token with every upload:
+
+``` http
+POST /api/images
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6...
+```
+
+Three claims in that token matter to us. `iss` is `https://securetoken.google.com/PROJECT_ID`, `aud` is `PROJECT_ID`, and `sub` is the user's stable ID. Tokens expire after an hour, and the SDK refreshes them on its own.
+
+### Verifying tokens in the gateway
+
+The gateway must check that a token really came from our project's Identity Platform and hasn't expired. That means checking the signature against Google's published keys, then the issuer, the audience, and the expiry. That's standard OpenID Connect, so we don't write any of it ourselves: `github.com/coreos/go-oidc` does it all from the issuer's discovery document. `services/gateway/auth.go` wraps it behind a one-method interface:
+
+``` go
+// authenticator resolves who is making a request.
+type authenticator interface {
+    UserID(r *http.Request) (string, error)
+}
+
+type oidcAuth struct{ verifier *oidc.IDTokenVerifier }
+
+func newOIDCAuth(ctx context.Context, issuer, audience string) (*oidcAuth, error) {
+    provider, err := oidc.NewProvider(ctx, issuer) // fetches discovery + keys
+    if err != nil {
+        return nil, fmt.Errorf("oidc discovery for %s: %w", issuer, err)
+    }
+    return &oidcAuth{verifier: provider.Verifier(&oidc.Config{ClientID: audience})}, nil
+}
+
+func (a *oidcAuth) UserID(r *http.Request) (string, error) {
+    raw, ok := bearerToken(r) // the part after "Authorization: Bearer "
+    if !ok {
+        return "", errNoToken
+    }
+    tok, err := a.verifier.Verify(r.Context(), raw)
+    if err != nil {
+        return "", err
+    }
+    if tok.Subject == "" {
+        return "", errors.New("token has no subject")
+    }
+    return tok.Subject, nil
+}
+```
+
+Nothing in this code names Google. The provider is two settings, `AUTH_ISSUER` and `AUTH_AUDIENCE`, so moving to Auth0, Keycloak, or anything else that speaks OIDC is a configuration change.
+
+A middleware puts it in front of the upload route. It turns a request that carries a token into one that carries a *user*:
+
+``` go
+// UserHeader (in internal/platform/httpx) carries the verified user ID from
+// the gateway to internal services.
+const UserHeader = "X-Snapvault-User"
+
+func requireUser(auth authenticator, log *slog.Logger, next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        user, err := auth.UserID(r)
+        if err != nil {
+            w.Header().Set("WWW-Authenticate", `Bearer realm="snapvault"`)
+            http.Error(w, "authentication required", http.StatusUnauthorized)
+            return
+        }
+        r.Header.Del("Authorization") // internal services never see the token
+        r.Header.Set(httpx.UserHeader, user)
+        next.ServeHTTP(w, r)
+    })
+}
+
+// stripInternalHeaders runs on every request, before anything else.
+func stripInternalHeaders(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        r.Header.Del(httpx.UserHeader)
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+In `main`, only the upload route is wrapped. Reading the feed and the images stays public:
+
+``` go
+mux.Handle("POST /api/images", requireUser(auth, log, uploadProxy))
+// ...
+var h http.Handler = mux
+h = stripInternalHeaders(h)
+```
+
+`stripInternalHeaders` is the line that makes the whole scheme sound. The images service will believe whatever `X-Snapvault-User` says, so a client must never be able to set it. Removing it from *every* inbound request means the only way that header reaches an internal service is by `requireUser` writing it, after a token has been verified.
+
+The images service changes in the opposite direction: it stops reading `owner` from the form and refuses any upload that didn't come through that check:
+
+``` go
+owner := r.Header.Get(httpx.UserHeader)
+if owner == "" {
+    http.Error(w, "authentication required", http.StatusUnauthorized)
+    return
+}
+```
+
+### Local development, failing closed
+
+There's no Identity Platform on your laptop, so the gateway has a development mode: set `AUTH_DEV_USER=dev-user` (Compose does) and every upload is attributed to that user without a token. The danger with any such switch is ending up in production by accident. So the gateway picks its mode **failing closed**:
+
+- `AUTH_ISSUER` and `AUTH_AUDIENCE` set: real verification.
+- Only `AUTH_DEV_USER` set: development mode, with a warning in the log at startup.
+- Neither set: the gateway *refuses to start*.
+
+A misconfigured deployment can't quietly become an open one. The prod overlay sets the issuer and audience (the `auth_issuer` and `auth_audience` Terraform outputs), and the base manifests set neither, so they can't run unconfigured.
+
+### The trust boundary
+
+Trusting a header is only safe if nobody but the gateway can send requests to the images service. The gateway is the only public entry point, and images is a `ClusterIP` Service, unreachable from outside the cluster. Inside the cluster, though, any Pod could call it directly. For defense in depth, add a Kubernetes **NetworkPolicy** that admits traffic to the images Pods only from the gateway, plus the kubelet's health probes and the Managed Prometheus collectors that scrape `/metrics`. That way a compromised Pod elsewhere in the namespace can't upload as anyone it likes.
+
+The verification code is tested like any other code, without Google. `services/gateway/auth_test.go` starts a fake OIDC issuer --- a discovery document and a key set on an `httptest` server --- and signs tokens with its own key. It checks that a valid token is accepted, and that a wrong audience, wrong issuer, expired token, foreign signing key, or missing subject are all rejected. A forged `X-Snapvault-User` never reaches upstream. These are exactly the properties an attacker would probe, so they're worth pinning down in tests.
+
+One more thing belongs at the same point: **per-user rate limits**, alongside the upload size limit from Chapter 5. Now that the gateway knows who is uploading, it can limit how much each user uploads.
 
 ## The system we built
 
@@ -334,7 +485,7 @@ But the most important lesson is the one from Chapter 1, and it's worth repeatin
 -   The **gateway aggregation** fans out to feed and metadata concurrently with independent timeouts, returns as slow as the slower call rather than their sum, and degrades when the optional dependency is down.
 -   Run **NATS as a 3-node cluster with replicated JetStream streams** (`Replicas: 3`) so neither the broker nor its messages depend on a single Pod.
 -   A **PodDisruptionBudget** preserves availability during voluntary disruptions; set **resource requests from observed metrics**, which is most of cost control on Autopilot.
--   Snapvault has **no authentication**; a public deployment needs identity verified at the gateway, with `owner` derived from it, plus per-user rate limits.
+-   **Identity Platform** signs users in and issues OIDC ID tokens. The gateway verifies them (`go-oidc`: signature, issuer, audience, expiry), derives `owner` from the token, and passes it inward in a header it strips from every client request. The gateway fails closed: no auth configuration, no start.
 -   The deepest lesson is Chapter 1's: this architecture is a cost as much as a capability --- adopt it when the workloads genuinely demand it, and build the monolith when they don't.
 
 There is no next chapter to bridge to --- Snapvault is built, deployed, observable, scalable, and resilient. What remains is reference material: the appendix collects the commands used throughout the book in one place, so the tools are at your fingertips as you build systems of your own.
