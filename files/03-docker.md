@@ -35,10 +35,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags="-s -w" -o /out/service ./services/${SERVICE}
+RUN mkdir -p /out/data
 
 # ---- final stage: just the binary ----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/service /service
+COPY --from=build --chown=65532:65532 /out/data /data
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/service"]
@@ -51,6 +53,7 @@ Every line earns its place. Walking through the non-obvious ones:
 -   **`COPY go.* ./` then `go mod download` as a separate step** is the most important caching trick. Docker caches each layer and reuses it if its inputs are unchanged. Because dependencies change far less often than source code, downloading them in their own layer means an ordinary code change reuses the cached dependency layer and rebuilds in seconds.
 -   **The `--mount=type=cache` lines** go further, persisting Go's build and module caches *across* builds (a BuildKit feature, on by default in current Docker). The first build is cold; every build after is dramatically faster.
 -   **`gcr.io/distroless/static-debian12:nonroot`** is a Google-maintained base image that contains a CA-certificates bundle, timezone data, and `/etc/passwd` --- and nothing else. No shell, no package manager, no utilities. That's a feature: an attacker who finds a way into your container finds no tools to pivot with, and there are essentially no OS packages to accumulate vulnerabilities. The `:nonroot` tag and the `USER nonroot` line mean the process runs as an unprivileged user, never root.
+-   **The empty `/data` owned by UID 65532** (the `nonroot` user) is for Chapter 4. There, Compose mounts a *named volume* at `/data` for the images the service stores, and Docker seeds a new named volume from whatever the image has at that path, ownership included. Without this directory the volume comes up owned by root, the unprivileged service can't write to it, and every upload fails with `permission denied`. The build stage creates the directory because the distroless image has no shell to run `mkdir` in.
 -   **`ARG SERVICE=images`** parameterizes which service to build. Because every Snapvault service shares this exact Dockerfile, in Chapter 8 we'll build all five from one template by passing `--build-arg SERVICE=feed` and so on.
 
 Add a `.dockerignore` at the repository root so the build context stays small and clean --- you don't want your `.git` directory or local data shipped into the build:

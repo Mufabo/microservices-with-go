@@ -22,10 +22,16 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-    -o /out/app ./services/${SERVICE}
+    -o /out/app ./services/${SERVICE} && \
+    mkdir -p /out/data
 
 # ---- final stage: just the binary on a distroless base ----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/app /app
+# An empty /data owned by the nonroot user (UID 65532). Docker seeds a new
+# named volume mounted here with this directory, ownership included, so the
+# disk storage backend can write to it. Without it the volume is root-owned
+# and every local upload fails with "permission denied".
+COPY --from=build --chown=65532:65532 /out/data /data
 USER nonroot
 ENTRYPOINT ["/app"]
