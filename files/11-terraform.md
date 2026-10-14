@@ -293,7 +293,9 @@ The connection string, with that password, is a secret. Because the proxy listen
 ``` hcl
 resource "google_secret_manager_secret" "database_url" {
   secret_id = "snapvault-database-url"
-  replication { auto {} }
+  replication {
+    auto {}
+  }
 }
 ```
 

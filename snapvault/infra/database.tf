@@ -47,7 +47,9 @@ resource "google_project_iam_member" "runtime_cloudsql" {
 # driver). Keeping the connection string here means it never lands in git.
 resource "google_secret_manager_secret" "database_url" {
   secret_id = "snapvault-database-url"
-  replication { auto {} }
+  replication {
+    auto {}
+  }
 }
 
 # The DSN points at the Auth Proxy sidecar on localhost. sslmode=disable only
