@@ -8,7 +8,7 @@ Everything here is hands-on. Each chapter adds working code, and the code in one
 
 ## What you will build: Snapvault
 
-Our running example is **Snapvault**, a small but realistic photo-sharing service. Users upload photos; the system stores the originals, generates thumbnails in the background, records metadata such as titles and tags, and serves a public feed of recent uploads. It is deliberately the kind of application that *forces* you to confront every interesting problem in distributed systems:
+Our running example is **Snapvault**, a small but realistic photo-sharing service. Users upload photos; the system stores the originals, generates thumbnails in the background, records metadata such as file type, size, and tags, and serves a public feed of recent uploads. It is deliberately the kind of application that *forces* you to confront every interesting problem in distributed systems:
 
 -   It handles **large binary uploads**, so it needs object storage rather than a database column.
 -   It does **slow background work** (thumbnailing), so it needs asynchronous messaging rather than blocking HTTP calls.

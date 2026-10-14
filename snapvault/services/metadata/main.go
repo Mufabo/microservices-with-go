@@ -43,9 +43,14 @@ func main() {
 	}
 	defer func() { _ = shutdown(ctx) }()
 
-	store, err := newMetaStore(ctx,
-		config.MustString("MONGO_URI"),
-		config.String("MONGO_DB", "snapvault"))
+	// MONGO_URI may arrive as a CSI-mounted file (MONGO_URI_FILE) in the
+	// cluster or as a plain env var locally.
+	mongoURI := config.FileOrEnv("MONGO_URI")
+	if mongoURI == "" {
+		log.Error("MONGO_URI (or MONGO_URI_FILE) is not set")
+		os.Exit(1)
+	}
+	store, err := newMetaStore(ctx, mongoURI, config.String("MONGO_DB", "snapvault"))
 	if err != nil {
 		log.Error("mongo connect", "err", err)
 		os.Exit(1)

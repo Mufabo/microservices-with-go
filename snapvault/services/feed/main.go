@@ -29,6 +29,11 @@ import (
 
 const defaultFeedLimit = 50
 
+// thumbRetryDelay spaces out redeliveries of a thumbnail whose feed row does
+// not exist yet, so the matching upload event has time to be applied before
+// the consumer's MaxDeliver attempts run out.
+const thumbRetryDelay = 5 * time.Second
+
 type service struct {
 	store *feedStore
 	log   *slog.Logger
@@ -109,9 +114,12 @@ func main() {
 	}
 }
 
-// handle dispatches on the message subject. Events arrive in stream order, so
-// images.uploaded (which creates the row) is always seen before the matching
-// images.thumbnailed (which fills in the thumbnail).
+// handle dispatches on the message subject. images.uploaded creates the row and
+// images.thumbnailed fills in the thumbnail. Stream order alone does not
+// guarantee the row exists first: with several feed replicas the two events can
+// be handled by different Pods, and a Nak'd upload is redelivered after the
+// thumbnail. A thumbnail with no row yet is therefore retried after a delay
+// rather than acknowledged and lost.
 func (s *service) handle(msg jetstream.Msg) {
 	ctx := otel.GetTextMapPropagator().Extract(context.Background(),
 		telemetry.NatsHeaderCarrier(msg.Headers()))
@@ -140,7 +148,13 @@ func (s *service) handle(msg jetstream.Msg) {
 			_ = msg.Term()
 			return
 		}
-		if err := s.store.SetThumb(ctx, evt.ID, evt.ThumbObject, evt.Width, evt.Height); err != nil {
+		err := s.store.SetThumb(ctx, evt.ID, evt.ThumbObject, evt.Width, evt.Height)
+		if errors.Is(err, errNoFeedItem) {
+			s.log.Warn("thumbnail arrived before its feed item; retrying", "id", evt.ID)
+			_ = msg.NakWithDelay(thumbRetryDelay)
+			return
+		}
+		if err != nil {
 			s.log.Error("attach thumbnail failed; will retry", "id", evt.ID, "err", err)
 			_ = msg.Nak()
 			return

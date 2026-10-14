@@ -184,7 +184,7 @@ never fights the Horizontal Pod Autoscaler.
 | `STORAGE`              | images, thumbnails | `gcs` or disk (default)                  |
 | `GCS_BUCKET`           | images, thumbnails | bucket name when `STORAGE=gcs`           |
 | `DATA_DIR`             | images, thumbnails | disk path when not using GCS             |
-| `MONGO_URI`/`MONGO_DB` | metadata           | MongoDB connection                       |
+| `MONGO_URI`/`MONGO_DB` | metadata           | MongoDB connection (or `MONGO_URI_FILE`) |
 | `DATABASE_URL`         | feed               | PostgreSQL DSN (or `DATABASE_URL_FILE`)  |
 | `IMAGES_URL`/`FEED_URL`/`METADATA_URL` | gateway | upstream service addresses           |
 | `GOOGLE_CLOUD_PROJECT` | all                | enables Cloud Trace export when set      |

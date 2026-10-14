@@ -2,7 +2,9 @@
 
 Look back at what we did to put Snapvault on the cluster in Chapter 9. We wrote five Deployment manifests that are ninety percent identical --- the same probe block, the same `envFrom`, the same `resources`, the same labels --- differing only in a name, a port, and a replica count. We applied them one `kubectl apply -f` at a time. We baked the image registry and a literal commit SHA straight into the YAML, so shipping a new build meant editing those files or running `kubectl set image` by hand. And when we needed NATS, we didn't write its StatefulSet at all --- we ran a single `helm install` and got a correct, persistent, JetStream-enabled broker for free.
 
-That last move is the tell. We already reached for a packaging tool the moment the YAML got genuinely hard, and it paid off immediately. This chapter turns Snapvault's *own* pile of manifests into the same kind of artifact: a **Helm chart** --- a single, versioned, parameterized package that installs, upgrades, and rolls back the whole system as one unit, and that pulls in NATS as a declared dependency rather than a remembered command.
+That last move is the tell. We already reached for a packaging tool the moment the YAML got genuinely hard, and it paid off immediately. This chapter turns Snapvault's *own* pile of manifests into the same kind of artifact: a **Helm chart** --- a single, versioned, parameterized package that installs, upgrades, and rolls back the whole system as one unit, and that can pull in NATS as a declared dependency rather than a remembered command.
+
+It's worth saying up front where this leads. Helm is the tool we'll keep using for *other people's* software: NATS in Chapters 9, 12, and 14, and ArgoCD itself in Chapter 12. For Snapvault's *own* services, Chapter 12 deploys plain Kustomize manifests under GitOps instead, for reasons the "Helm or Kustomize?" section at the end of this chapter lays out. Building the chart is still worth the time. Every chart you install is built exactly this way, you can't judge the trade-off without having written one, and if your situation tips the other way --- you ship Snapvault to other teams, say --- this chart is what you'd deploy.
 
 ![Helm renders a chart --- templates plus a values file --- into Kubernetes manifests, and tracks each install as a release with a numbered revision history you can roll back to.](images/ch10_helm.png)
 
@@ -40,7 +42,7 @@ This produces a `snapvault/` directory with a `Chart.yaml`, a `values.yaml`, a `
 
 ## Describing the package: Chart.yaml
 
-`Chart.yaml` is the package manifest. It carries two versions that mean different things --- the chart's own version (bump it when you change the templates) and `appVersion` (the version of Snapvault it deploys) --- and it declares NATS as a dependency so we never hand-write that broker again.
+`Chart.yaml` is the package manifest. It carries two versions that mean different things --- the chart's own version (bump it when you change the templates) and `appVersion` (the version of Snapvault it deploys) --- and it can declare NATS as a dependency so the chart brings its own broker.
 
 ``` yaml
 apiVersion: v2
@@ -57,7 +59,7 @@ dependencies:
     condition: nats.enabled
 ```
 
-The `condition` lets an environment switch the bundled NATS off --- useful in production, where you'll run a separate three-node NATS cluster (Chapter 14) and point the services at it instead. Before installing, pull the dependency down into `charts/`:
+The `condition` makes the bundled NATS optional. We'll leave it **off** by default, because Snapvault already runs NATS as its own `nats` release from Chapter 9 and keeps it that way for the rest of the book. Bundling suits the opposite case: someone installing Snapvault from scratch who wants one command to bring up everything, broker included. Even with the dependency switched off, Helm still wants it present, so pull it down into `charts/`:
 
 ``` bash
 $ helm dependency update snapvault
@@ -123,7 +125,7 @@ secretName: snapvault-secrets
 
 # Non-secret configuration, injected into every service as env vars.
 config:
-  NATS_URL: "nats://snapvault-nats:4222"
+  NATS_URL: "nats://nats:4222"   # the standalone `nats` release from Chapter 9
   STORAGE: "gcs"
   GCS_BUCKET: "snapvault-uploads-prod"
   MONGO_DB: "snapvault"
@@ -169,9 +171,9 @@ services:
       requests: { cpu: 500m, memory: 256Mi }
       limits:   { memory: 512Mi }
 
-# Values passed through to the NATS subchart.
+# Values passed through to the NATS subchart (off: NATS is its own release).
 nats:
-  enabled: true
+  enabled: false
   config:
     jetstream:
       enabled: true
@@ -180,7 +182,7 @@ nats:
           size: 10Gi
 ```
 
-`NATS_URL` points at `snapvault-nats` --- the Service the NATS subchart renders, named after the release plus the chart (`snapvault` + `nats`). The `nats:` block at the bottom isn't read by our templates at all; Helm hands any top-level key matching a dependency's name straight to that subchart, so this is how we configure NATS's JetStream and volume size from our own values file.
+`NATS_URL` points at `nats`, the standalone release from Chapter 9. The `nats:` block at the bottom isn't read by our templates at all; Helm hands any top-level key matching a dependency's name straight to that subchart, so this is how you'd configure the bundled broker's JetStream and volume size from our own values file. Flip `nats.enabled` to `true` and the chart renders its own broker, named after the release plus the chart --- `snapvault-nats` --- so `NATS_URL` would have to become `nats://snapvault-nats:4222` to match.
 
 ## One template, five Deployments
 
@@ -235,7 +237,7 @@ spec:
 {{- end }}
 ```
 
-A few mechanics earn their keep here. Inside `range`, the dot (`.`) rebinds to the current element, so we use `$name` and `$svc` for the loop variables and `$` to reach back to the root for globals like `$.Values.image`. `include "..." $` pulls in a named helper and `nindent N` re-indents its output to the right YAML depth. `toYaml $svc.resources` serializes the whole `resources` value as-is, so the structure lives in `values.yaml`, not the template. And the `{{- if $.Values.secretName }}` block makes the Secret optional: the gateway has no secret in Chapter 9's setup, and a chart that bends to that without edits is a chart you can actually reuse.
+A few mechanics earn their keep here. Inside `range`, the dot (`.`) rebinds to the current element, so we use `$name` and `$svc` for the loop variables and `$` to reach back to the root for globals like `$.Values.image`. `include "..." $` pulls in a named helper and `nindent N` re-indents its output to the right YAML depth. `toYaml $svc.resources` serializes the whole `resources` value as-is, so the structure lives in `values.yaml`, not the template. And the `{{- if $.Values.secretName }}` block makes the Secret optional for the whole chart: install it somewhere secrets arrive another way (Chapter 14 mounts them from Secret Manager) and you set `secretName: ""` instead of editing templates. It's all-or-nothing, though --- every service gets the same Secret. Chapter 9's gateway had none; here it gets one, which is harmless because it simply ignores the variables. A per-service `secret: true` flag in the `services` map would be the next refinement if that mattered.
 
 Notice what is *not* here: the thumbnails worker gets a Deployment from this same loop, on port 8081, with no special-casing. Its difference --- having no Service --- is expressed entirely by the absence of a `service:` key in its values, which the next template respects.
 
@@ -293,7 +295,7 @@ Installing creates release **revision 1**:
 $ helm install snapvault ./snapvault --namespace snapvault --create-namespace
 ```
 
-Helm applies every object --- ServiceAccount, ConfigMap, five Deployments, four Services, and the NATS subchart's StatefulSet and volume --- and records the result as one release. In day-to-day use you don't run `install` and `upgrade` separately; `upgrade --install` does the right thing whether or not the release exists, which is exactly what a CI pipeline wants:
+Helm applies every object --- ServiceAccount, ConfigMap, five Deployments, four Services, plus the NATS subchart's StatefulSet and volume if you enabled it --- and records the result as one release. In day-to-day use you don't run `install` and `upgrade` separately; `upgrade --install` does the right thing whether or not the release exists, which is exactly what a CI pipeline wants:
 
 ``` bash
 $ helm upgrade --install snapvault ./snapvault \
@@ -332,21 +334,17 @@ image:
 
 config:
   GCS_BUCKET: "snapvault-uploads-prod"
-  NATS_URL: "nats://nats-prod:4222"   # external NATS cluster
 
 services:
   thumbnails:
     replicas: 3                # more workers for the upload surge
-
-nats:
-  enabled: false               # prod runs a dedicated NATS cluster (Chapter 14)
 ```
 
-Setting `nats.enabled: false` makes the `condition` in `Chart.yaml` drop the bundled broker entirely, and `NATS_URL` is repointed at the standalone cluster. The same chart, two environments, one small overlay file --- and the commit SHA stays out of the file, injected by the pipeline at deploy time.
+Helm merges maps key by key, so this file changes the registry, the bucket, and one replica count, and inherits everything else --- including `nats.enabled: false` and the `nats://nats:4222` address. The same chart, two environments, one small overlay file --- and the commit SHA stays out of the file, injected by the pipeline at deploy time.
 
 ## Helm or Kustomize?
 
-You now have two ways to package Snapvault: the Kustomize bases and overlays from Chapter 9, and this chart. They solve overlapping problems with different philosophies, and it's worth being honest about the trade-off rather than declaring a winner.
+You now know two ways to package Snapvault: the plain manifests from Chapter 9, and this chart. The plain manifests grow into the third option once you need per-environment differences: **Kustomize**, which Chapter 12 uses. They solve overlapping problems with different philosophies, and it's worth being honest about the trade-off rather than declaring a winner.
 
 **Kustomize** never templates. You write real, valid Kubernetes YAML --- the base --- and describe changes as *patches* layered in overlays. There is no templating language to learn or misindent, and it's built into `kubectl` (`kubectl apply -k`). It shines when your variation is "the same manifests, with a few fields different per environment," and it keeps the manifests readable as plain YAML the whole way through.
 
@@ -360,7 +358,7 @@ Resist the urge to template everything. The best charts keep logic shallow: a va
 
 ## Helm under GitOps
 
-In Chapter 12 we hand continuous deployment to ArgoCD, and Helm fits that two ways. ArgoCD can consume a chart directly --- an `Application` points at the chart's location, a `targetRevision`, and a list of values files or parameters, and ArgoCD renders and syncs it. Or you can render the chart to plain YAML in CI (`helm template`) and commit the result to the config repository, so what Git holds is the exact, fully-expanded manifest set --- the "rendered manifests" pattern, prized for leaving nothing to interpret at deploy time. Both are common; we'll deploy Snapvault's Kustomize overlay in Chapter 12 and note where a chart would slot in instead.
+In Chapter 12 we hand continuous deployment to ArgoCD, and Helm fits that two ways. ArgoCD can consume a chart directly --- an `Application` points at the chart's location, a `targetRevision`, and a list of values files or parameters, and ArgoCD renders and syncs it. Or you can render the chart to plain YAML in CI (`helm template`) and commit the result to the config repository, so what Git holds is the exact, fully-expanded manifest set --- the "rendered manifests" pattern, prized for leaving nothing to interpret at deploy time. Both are common. Following this chapter's own rule --- our own app, modest per-environment differences, GitOps --- Chapter 12 deploys Snapvault's services as a Kustomize overlay, and uses the direct-chart style for the third-party NATS chart.
 
 ### Summary
 
@@ -368,7 +366,7 @@ In Chapter 12 we hand continuous deployment to ArgoCD, and Helm fits that two wa
 -   A single `deployment.yaml` template **ranged over a `services` map** replaces Chapter 9's five near-identical manifests; the worker's lack of a Service is expressed by omitting a `service:` key, not by special-casing.
 -   `_helpers.tpl` holds shared **name and label** snippets pulled in with `include` and `nindent`; `toYaml` hands structured values like `resources` straight through.
 -   Service DNS names stay **bare** (`images`, `gateway`) because the gateway resolves siblings by them; only chart-internal objects take the release-prefixed fullname.
--   **NATS ships as a declared dependency** in `Chart.yaml`, fetched by `helm dependency update` and configured through a `nats:` block in values --- no more remembered `helm install`.
+-   A chart can **declare other charts as dependencies** (here, an optional NATS), fetched by `helm dependency update`, switched by a `condition`, and configured through a matching top-level block in values. Snapvault leaves it off and keeps NATS as its own release.
 -   `helm upgrade --install` is the CI-friendly deploy; every run is a **revision**, and `helm rollback` restores the **whole release** at once --- unlike `kubectl rollout undo`, which reverts one Deployment.
 -   Per-environment differences live in a small **overlay values file** (`-f values-prod.yaml`), with the image tag injected by the pipeline via `--set`.
 -   **Kustomize vs Helm** is a real choice: Kustomize for plain-YAML, per-env patches (great under GitOps); Helm for distributable, versioned packages and third-party dependencies. Many teams use both --- and `helm template` always lets you see exactly what will be applied.

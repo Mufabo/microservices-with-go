@@ -12,6 +12,21 @@ spec:
       labels: { app: feed }
     spec:
       serviceAccountName: snapvault
+      initContainers:
+        # Cloud SQL Auth Proxy as a native sidecar (restartPolicy: Always): it
+        # starts before the feed container and listens on 127.0.0.1:5432, which
+        # is where DATABASE_URL points. The instance connection name is set per
+        # environment in the overlay.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+          restartPolicy: Always
+          args:
+            - --port=5432
+            - INSTANCE_CONNECTION_NAME
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
       containers:
         - name: feed
           image: snapvault/feed:latest

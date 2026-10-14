@@ -102,11 +102,19 @@ default:
 **Credentials you never see in code.** The GCS client authenticates through *Application Default Credentials*: locally it uses the login from `gcloud auth application-default login`; on GKE it uses the pod's Workload Identity (Chapter 9), with no key file anywhere. Notice there is no API key or secret in the code above --- and there never should be. Hard-coded cloud credentials are the single most common way private buckets become public breaches.
 :::
 
-With `Put` in place we can add an upload handler, the entry point for new photos. It stores the original and returns a generated ID:
+With `Put` in place we can add an upload handler, the entry point for new photos. It caps the request size, stores the original under `originals/<id>`, and returns a generated ID:
 
 ``` go
+const maxUploadBytes = 25 << 20 // 25 MiB
+
 func uploadImage(store blobStore, log *slog.Logger) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
+        // Never read an unbounded body from the internet.
+        r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+        if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+            http.Error(w, "invalid upload", http.StatusBadRequest)
+            return
+        }
         file, hdr, err := r.FormFile("image")
         if err != nil {
             http.Error(w, "expected an 'image' file field", http.StatusBadRequest)
@@ -116,15 +124,19 @@ func uploadImage(store blobStore, log *slog.Logger) http.HandlerFunc {
 
         id := newID()
         ct := hdr.Header.Get("Content-Type")
+        if ct == "" {
+            ct = "application/octet-stream"
+        }
         if err := store.Put(r.Context(), "originals/"+id, ct, file); err != nil {
             log.Error("store upload", "id", id, "err", err)
             http.Error(w, "could not store image", http.StatusInternalServerError)
             return
         }
 
-        w.Header().Set("Content-Type", "application/json")
-        _ = json.NewEncoder(w).Encode(map[string]string{"id": id})
         log.Info("image uploaded", "id", id, "name", hdr.Filename)
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusCreated)
+        _ = json.NewEncoder(w).Encode(map[string]string{"id": id})
     }
 }
 
@@ -136,11 +148,44 @@ func newID() string {
 }
 ```
 
-Add `"crypto/rand"`, `"encoding/hex"`, and `"encoding/json"` to the imports, and register the route with `mux.HandleFunc("POST /images", uploadImage(store, log))`. The upload works now --- but nothing else in the system *knows* an upload happened. There is no thumbnail, no metadata record, no feed entry. Closing that gap is the whole of Chapter 6. For this chapter, the point is that originals now live in object storage, exactly where blobs belong.
+`http.MaxBytesReader` is the line people forget. Without it, anyone can stream an arbitrarily large body at the service and fill its memory or disk; with it, the read fails once the limit is passed and the client gets a `400`.
+
+Uploads now live under `originals/<id>` --- and, from Chapter 6 on, thumbnails under `thumbs/<id>.jpg` --- so the Chapter 2 `serveImage`, which read the bare request path as the key, would no longer find them. Give it a key prefix, and let it sniff the content type instead of assuming JPEG, since uploads can be PNG or GIF too:
+
+``` go
+// serveImage streams the object at prefix+{name}, sniffing its content type.
+func serveImage(store blobStore, prefix string) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        rc, err := store.Get(r.Context(), prefix+r.PathValue("name"))
+        if err != nil {
+            http.Error(w, "not found", http.StatusNotFound)
+            return
+        }
+        defer rc.Close()
+
+        buf := bufio.NewReader(rc)
+        if peek, _ := buf.Peek(512); len(peek) > 0 {
+            w.Header().Set("Content-Type", http.DetectContentType(peek))
+        }
+        w.Header().Set("Cache-Control", "public, max-age=86400")
+        _, _ = io.Copy(w, buf)
+    }
+}
+```
+
+Add `"bufio"`, `"crypto/rand"`, `"encoding/hex"`, and `"encoding/json"` to the imports, and register the routes:
+
+``` go
+mux.HandleFunc("POST /images", uploadImage(store, log))
+mux.HandleFunc("GET /images/{name}", serveImage(store, "originals/"))
+mux.HandleFunc("GET /thumbs/{name}", serveImage(store, "thumbs/"))
+```
+
+`GET /images/<id>` now returns the original you uploaded, and `GET /thumbs/<id>.jpg` is ready for the thumbnails Chapter 6 will produce. The upload works now --- but nothing else in the system *knows* an upload happened. There is no thumbnail, no metadata record, no feed entry. Closing that gap is the whole of Chapter 6. For this chapter, the point is that originals now live in object storage, exactly where blobs belong.
 
 ## Document data: the metadata service with MongoDB
 
-The metadata service records the descriptive facts about each image --- owner, title, tags, when it was uploaded. This data is a natural fit for a document database: tags are a variable-length list, titles are free text, and the shape may grow over time without a migration. MongoDB suits it well, and the official Go driver (v2) is straightforward. Create `services/metadata/store.go`:
+The metadata service records the descriptive facts about each image --- owner, original filename, content type, size, tags, when it was uploaded. This data is a natural fit for a document database: tags are a variable-length list, and the shape may grow over time (a caption, camera details) without a migration. MongoDB suits it well, and the official Go driver (v2) is straightforward. Create `services/metadata/store.go`:
 
 ``` go
 package main
@@ -157,11 +202,13 @@ import (
 
 // ImageMeta is the document we store per image.
 type ImageMeta struct {
-    ID         string    `bson:"_id"         json:"id"`
-    Owner      string    `bson:"owner"       json:"owner"`
-    Title      string    `bson:"title"       json:"title"`
-    Tags       []string  `bson:"tags"        json:"tags"`
-    UploadedAt time.Time `bson:"uploaded_at" json:"uploaded_at"`
+    ID           string    `bson:"_id"            json:"id"`
+    Owner        string    `bson:"owner"          json:"owner"`
+    ContentType  string    `bson:"content_type"   json:"content_type"`
+    OriginalName string    `bson:"original_name"  json:"original_name"`
+    Size         int64     `bson:"size"           json:"size"`
+    Tags         []string  `bson:"tags,omitempty" json:"tags,omitempty"`
+    UploadedAt   time.Time `bson:"uploaded_at"    json:"uploaded_at"`
 }
 
 type metaStore struct{ coll *mongo.Collection }
@@ -181,13 +228,20 @@ func newMetaStore(ctx context.Context, uri, db string) (*metaStore, func(context
     return &metaStore{coll: coll}, client.Disconnect, nil
 }
 
-// Upsert writes or replaces a metadata document. It is idempotent: applying
-// the same record twice leaves the same state, which matters once messages
-// can be redelivered (Chapter 6).
+// Upsert writes m keyed by its ID. It sets only the mutable fields (never
+// _id), so it is idempotent: applying the same record twice leaves the same
+// state, which matters once messages can be redelivered (Chapter 6).
 func (s *metaStore) Upsert(ctx context.Context, m ImageMeta) error {
     _, err := s.coll.UpdateOne(ctx,
         bson.D{{Key: "_id", Value: m.ID}},
-        bson.D{{Key: "$set", Value: m}},
+        bson.D{{Key: "$set", Value: bson.D{
+            {Key: "owner", Value: m.Owner},
+            {Key: "content_type", Value: m.ContentType},
+            {Key: "original_name", Value: m.OriginalName},
+            {Key: "size", Value: m.Size},
+            {Key: "tags", Value: m.Tags},
+            {Key: "uploaded_at", Value: m.UploadedAt},
+        }}},
         options.UpdateOne().SetUpsert(true),
     )
     return err
@@ -262,26 +316,30 @@ import (
     "github.com/jackc/pgx/v5/pgxpool"
 )
 
+// FeedItem is one row of the public gallery. The thumbnail fields stay empty
+// until the thumbnails worker has run (Chapter 6).
 type FeedItem struct {
-    ID        string    `json:"id"         db:"id"`
-    Owner     string    `json:"owner"      db:"owner"`
-    Title     string    `json:"title"      db:"title"`
-    ThumbURL  string    `json:"thumb_url"  db:"thumb_url"`
-    CreatedAt time.Time `json:"created_at" db:"created_at"`
+    ID          string    `json:"id"                     db:"id"`
+    Owner       string    `json:"owner"                  db:"owner"`
+    ThumbObject string    `json:"thumb_object,omitempty" db:"thumb_object"`
+    Width       int       `json:"width,omitempty"        db:"width"`
+    Height      int       `json:"height,omitempty"       db:"height"`
+    UploadedAt  time.Time `json:"uploaded_at"            db:"uploaded_at"`
 }
 
 type feedStore struct{ pool *pgxpool.Pool }
 
 const schema = `
 CREATE TABLE IF NOT EXISTS feed_items (
-    id         TEXT PRIMARY KEY,
-    owner      TEXT NOT NULL,
-    title      TEXT NOT NULL DEFAULT '',
-    thumb_url  TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id           TEXT PRIMARY KEY,
+    owner        TEXT NOT NULL,
+    thumb_object TEXT,
+    width        INTEGER,
+    height       INTEGER,
+    uploaded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS feed_items_created_at_idx
-    ON feed_items (created_at DESC);`
+CREATE INDEX IF NOT EXISTS feed_items_uploaded_at_idx
+    ON feed_items (uploaded_at DESC);`
 
 func newFeedStore(ctx context.Context, dsn string) (*feedStore, error) {
     pool, err := pgxpool.New(ctx, dsn)
@@ -295,22 +353,25 @@ func newFeedStore(ctx context.Context, dsn string) (*feedStore, error) {
     return &feedStore{pool: pool}, nil
 }
 
-// Add inserts an item, or updates it if the id already exists — idempotent,
-// for the same redelivery reasons as the metadata store.
+// Add inserts a new item and ignores duplicates — idempotent, for the same
+// redelivery reasons as the metadata store.
 func (s *feedStore) Add(ctx context.Context, it FeedItem) error {
     _, err := s.pool.Exec(ctx,
-        `INSERT INTO feed_items (id, owner, title, thumb_url, created_at)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (id) DO UPDATE
-           SET title = EXCLUDED.title, thumb_url = EXCLUDED.thumb_url`,
-        it.ID, it.Owner, it.Title, it.ThumbURL, it.CreatedAt)
+        `INSERT INTO feed_items (id, owner, uploaded_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO NOTHING`,
+        it.ID, it.Owner, it.UploadedAt)
     return err
 }
 
 func (s *feedStore) Recent(ctx context.Context, limit int) ([]FeedItem, error) {
     rows, err := s.pool.Query(ctx,
-        `SELECT id, owner, title, thumb_url, created_at
-         FROM feed_items ORDER BY created_at DESC LIMIT $1`, limit)
+        `SELECT id, owner,
+                COALESCE(thumb_object, '') AS thumb_object,
+                COALESCE(width, 0)         AS width,
+                COALESCE(height, 0)        AS height,
+                uploaded_at
+         FROM feed_items ORDER BY uploaded_at DESC LIMIT $1`, limit)
     if err != nil {
         return nil, err
     }
@@ -319,9 +380,11 @@ func (s *feedStore) Recent(ctx context.Context, limit int) ([]FeedItem, error) {
 }
 ```
 
+Notice `DO NOTHING` rather than `DO UPDATE`. It's tempting to make a repeated insert "refresh" the row, but in Chapter 6 a *different* event fills in the thumbnail columns. If a redelivered upload event overwrote the row, it would wipe a thumbnail that had already been attached. An idempotent write has to be idempotent with respect to every other writer of the same row, not just to itself. The `COALESCE` calls turn the thumbnail columns' `NULL`s (no thumbnail yet) into zero values that scan cleanly into the struct's plain `string` and `int` fields.
+
 A few `pgx` idioms are worth pointing out. The pool (`pgxpool`) is safe for concurrent use and is what a service should hold --- never a single connection. Parameters are passed positionally as `$1`, `$2`, ..., never by string-concatenating values into SQL, which is how injection happens. And `pgx.CollectRows` with `pgx.RowToStructByName[FeedItem]` scans result rows straight into our struct by matching the `db` tags to column names --- which is why `FeedItem` carries both `json` tags (for the API) and `db` tags (for the database). Creating the schema with `IF NOT EXISTS` on startup is a pragmatic choice for this book; a production system would manage schema with versioned migrations, which we note in Chapter 8.
 
-The feed service exposes a single read endpoint, `GET /feed`, returning the recent items as JSON --- the data behind Snapvault's public gallery. As with metadata, only the feed service speaks Postgres; everyone else sees JSON.
+The feed service exposes `GET /feed`, returning the recent items as JSON --- the data behind Snapvault's public gallery --- and `GET /feed/{id}` for a single item, which the gateway uses in Chapter 14. As with metadata, only the feed service speaks Postgres; everyone else sees JSON.
 
 ## Adding the data stores to Compose
 

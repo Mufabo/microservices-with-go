@@ -35,6 +35,13 @@ patches:
       - op: add
         path: /data/GCS_BUCKET
         value: snapvault-uploads-prod
+  # Point the feed's Cloud SQL Auth Proxy at this environment's instance
+  # (the `cloudsql_connection_name` Terraform output).
+  - target: { kind: Deployment, name: feed }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/initContainers/0/args/1
+        value: PROJECT_ID:REGION:snapvault-pg
   # Bind the Kubernetes SA to the Google SA for Workload Identity.
   - target: { kind: ServiceAccount, name: snapvault }
     patch: |-

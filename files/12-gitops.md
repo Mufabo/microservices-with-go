@@ -22,37 +22,40 @@ Create a second Codeberg repository, `snapvault-config`, structured with Kustomi
 
     snapvault-config/
       base/
+        serviceaccount.yaml # the ServiceAccount from Chapter 9
+        config.yaml         # the ConfigMap
         gateway.yaml        # the Deployments + Services from Chapter 9
         images.yaml
         thumbnails.yaml
         metadata.yaml
         feed.yaml
-        config.yaml         # the ConfigMap
         kustomization.yaml
       overlays/
         prod/
           kustomization.yaml
           hpa.yaml          # the HPAs from Chapter 14
+          pdb.yaml          # the PodDisruptionBudget from Chapter 14
 
-The `base/kustomization.yaml` lists the shared resources, and the prod overlay layers environment-specific pieces on top and pins the images it should run:
+One edit happens on the way into `base/`: the image lines. In Chapter 9 each Deployment named its full registry path and a literal commit SHA. In the base, each names a short placeholder instead --- `image: snapvault/images:latest`, `snapvault/feed:latest`, and so on --- which is environment-neutral and never deployed as-is. The `base/kustomization.yaml` lists the shared resources, and the prod overlay layers environment-specific pieces on top and maps each placeholder to the real image it should run:
 
 ``` yaml
 # overlays/prod/kustomization.yaml
 resources:
   - ../../base
   - hpa.yaml
+  - pdb.yaml
 namespace: snapvault
 images:
-  - name: gateway
+  - name: snapvault/gateway            # must match the image name in base
     newName: us-central1-docker.pkg.dev/PROJECT_ID/snapvault/gateway
     newTag: "REPLACED_BY_CI"
-  - name: images
+  - name: snapvault/images
     newName: us-central1-docker.pkg.dev/PROJECT_ID/snapvault/images
     newTag: "REPLACED_BY_CI"
   # …one entry per service
 ```
 
-That `newTag` field is the seam where deployment happens: changing it, and committing, is what tells the cluster to run a new version. We'll have CI write it in a moment.
+The `name` is how Kustomize finds what to replace: it matches the image name as written in the base manifests, without the tag. If it doesn't match --- say the base still carried Chapter 9's full registry path while the overlay said `name: images` --- Kustomize silently changes nothing, and the cluster tries to pull whatever tag the base literally contains. `kubectl kustomize overlays/prod` renders the overlay locally, and is the quickest way to check that every image came out right. The `newTag` field is the seam where deployment happens: changing it, and committing, is what tells the cluster to run a new version. We'll have CI write it in a moment.
 
 ## Installing ArgoCD
 
@@ -78,6 +81,8 @@ resource "helm_release" "argocd" {
   version          = "7.8.0" # pin the chart version
 }
 ```
+
+The `helm_release` resource needs the `hashicorp/helm` provider next to `google` in `providers.tf`, configured to reach the new cluster: its endpoint and CA certificate from `google_container_cluster.snapvault`, and an access token from the `google_client_config` data source. The companion repository's `infra/providers.tf` shows the full block.
 
 This gives a satisfying division of labor: Terraform provisions the cluster and installs exactly one workload into it --- ArgoCD --- and from that point on, *Git drives everything else*. Terraform's job ends where GitOps begins.
 
@@ -116,6 +121,37 @@ spec:
 
 Apply that once, and ArgoCD takes over: it clones `snapvault-config`, renders `overlays/prod` with Kustomize, and applies the result into the `snapvault` namespace --- every Deployment and Service from Chapter 9, the ConfigMap, and the HPAs, all from Git. The `automated` sync policy means you never run `kubectl apply` again; a commit to the config repo is the deploy. `prune: true` means deleting a manifest from Git deletes it from the cluster, so Git is *complete* truth, not just additive. `selfHeal: true` means the cluster cannot drift: edit a live Deployment by hand and ArgoCD reverts it within seconds.
 
+One piece of the system isn't in that overlay: NATS, still the `nats` Helm release we installed by hand in Chapter 9. Hand it to ArgoCD too, with a second Application that points straight at the upstream chart --- ArgoCD renders Helm charts natively, so there's nothing to commit but the Application itself:
+
+``` yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nats
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://nats-io.github.io/k8s/helm/charts/
+    chart: nats
+    targetRevision: "1.2.*"        # better: pin the exact version you've tested
+    helm:
+      releaseName: nats            # keeps the Service named `nats`
+      valuesObject:
+        config:
+          jetstream:
+            enabled: true
+            fileStore:
+              pvc: { size: 10Gi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: snapvault
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+```
+
+The `releaseName` matters: it keeps the Service named `nats`, so `NATS_URL` doesn't change. ArgoCD adopts the existing objects rather than recreating them, and the broker's configuration now lives in Git like everything else. (This is the "direct chart" style from Chapter 10: Helm for third-party software, Kustomize for our own.)
+
 ::: warning
 The `ignoreDifferences` block is essential the moment you combine GitOps with autoscaling, and leaving it out causes a maddening bug. The HorizontalPodAutoscaler from Chapter 14 owns each Deployment's replica count, scaling it up and down with load. But the manifest in Git also specifies `replicas`, so without intervention ArgoCD sees the HPA's live value differ from Git, "corrects" it back, the HPA scales it again, ArgoCD reverts it again --- the two controllers fight, and your replica count oscillates. Telling ArgoCD to ignore `/spec/replicas` on Deployments hands that field to the HPA and ends the war. Whenever something *other* than Git is the rightful owner of a field, `ignoreDifferences` is how you say so.
 :::
@@ -153,7 +189,7 @@ spec:
         syncOptions: [CreateNamespace=true, ServerSideApply=true]
 ```
 
-Adding a new environment is now adding one line to the generator. The same pattern --- sometimes called *App of Apps* when one root Application installs a directory of other Application manifests --- lets the entire platform, including ArgoCD's own configuration, be declared in Git and bootstrapped from a single root the way Terraform created ArgoCD.
+Each generated Application expects its own overlay, so this assumes an `overlays/staging/` directory next to `overlays/prod/` --- typically the same base with a smaller bucket, fewer replicas, and its own image tags. With that in place, adding an environment is one overlay directory plus one line in the generator. The same pattern --- sometimes called *App of Apps* when one root Application installs a directory of other Application manifests --- lets the entire platform, including ArgoCD's own configuration, be declared in Git and bootstrapped from a single root the way Terraform created ArgoCD.
 
 ## Closing the loop: from a commit to a running version
 
@@ -167,20 +203,25 @@ Here is where Chapter 8's pipeline and this chapter finally meet. The pipeline b
     container:
       image: ghcr.io/catthehacker/ubuntu:act-latest
     steps:
+      - name: Install kustomize
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          mv kustomize /usr/local/bin/
+
       - name: Update image tags in the config repo
         run: |
           git clone "https://x:${{ secrets.CONFIG_REPO_TOKEN }}@codeberg.org/your-org/snapvault-config.git"
           cd snapvault-config/overlays/prod
           for svc in gateway images thumbnails metadata feed; do
             kustomize edit set image \
-              "$svc=us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/snapvault/$svc:${{ github.sha }}"
+              "snapvault/$svc=us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/snapvault/$svc:${{ github.sha }}"
           done
           git -c user.name=ci -c user.email=ci@snapvault commit \
             -am "deploy ${{ github.sha }}"
           git push
 ```
 
-`CONFIG_REPO_TOKEN` is a Codeberg access token scoped to write the config repo --- not a cloud credential, and powerless against the cluster. Running this as one `promote` job rather than inside the five-way build matrix matters: five parallel jobs pushing to the same branch would race and reject each other, so we collect the tags into a single commit. When that commit lands, ArgoCD notices and syncs the new images into the cluster. "Deploy deliberately," promised in Chapter 8, turns out to mean exactly this: a commit to the config repo, reviewable and revertible like any other.
+The left side of each `snapvault/$svc=...` is the placeholder name from the base, the same `name` the overlay's `images:` list matches on. `CONFIG_REPO_TOKEN` is a Codeberg access token scoped to write the config repo --- not a cloud credential, and powerless against the cluster. Running this as one `promote` job rather than inside the five-way build matrix matters: five parallel jobs pushing to the same branch would race and reject each other, so we collect the tags into a single commit. When that commit lands, ArgoCD notices and syncs the new images into the cluster. "Deploy deliberately," promised in Chapter 8, turns out to mean exactly this: a commit to the config repo, reviewable and revertible like any other.
 
 By default ArgoCD polls Git every three minutes, so a deploy can lag by that much. For immediate syncs, add a webhook in the Codeberg repository pointing at ArgoCD's `/api/webhook` endpoint; a push then triggers a sync at once. (If the config repo is private, ArgoCD needs read credentials too, supplied as a repository Secret in the `argocd` namespace.)
 
@@ -190,7 +231,7 @@ There are two ways to get a new image's tag into Git, and it's worth knowing bot
 
 ## Drift, rollback, and ordering
 
-Three everyday behaviors show why GitOps changes how it *feels* to operate a system. **Drift** simply can't persist: with `selfHeal` on, a well-meaning `kubectl scale` or `kubectl edit` against the live cluster is reverted to match Git within seconds, so the cluster is always exactly what the repo says --- there is no such thing as an undocumented production change anymore. **Rollback** is `git revert`: to undo a bad deploy, revert the commit that changed the image tag and let ArgoCD sync the previous version back. (One sharp edge to know: ArgoCD refuses `argocd app rollback` while automated sync is enabled, because auto-sync would immediately re-apply Git; reverting in Git is the GitOps-native way, and it keeps the rollback itself in your history.) And **ordering** --- for cases where one resource must exist before another, like the database schema being migrated before new code starts --- ArgoCD offers sync waves and resource hooks: annotate the Chapter 8 migration job as a `PreSync` hook and it runs to completion before the Deployments roll, giving you the "migrate, then deploy" sequencing as a property of the manifests rather than a step in a script.
+Three everyday behaviors show why GitOps changes how it *feels* to operate a system. **Drift** simply can't persist: with `selfHeal` on, a well-meaning `kubectl scale` or `kubectl edit` against the live cluster is reverted to match Git within seconds, so the cluster is always exactly what the repo says --- there is no such thing as an undocumented production change anymore. **Rollback** is `git revert`: to undo a bad deploy, revert the commit that changed the image tag and let ArgoCD sync the previous version back. (One sharp edge to know: ArgoCD refuses `argocd app rollback` while automated sync is enabled, because auto-sync would immediately re-apply Git; reverting in Git is the GitOps-native way, and it keeps the rollback itself in your history.) And **ordering** --- for cases where one resource must exist before another, like the database schema being migrated before new code starts --- ArgoCD offers sync waves and resource hooks: package the Chapter 8 migration as a Kubernetes Job (the `migrate` image running against the `migrations/` directory, connecting through the same Cloud SQL Auth Proxy as the feed), annotate it as a `PreSync` hook, and it runs to completion before the Deployments roll, giving you the "migrate, then deploy" sequencing as a property of the manifests rather than a step in a script.
 
 Step back and notice the shift. Deployment is no longer an action a person takes against the cluster; it's a state the cluster maintains by reading Git. Every change is reviewed, recorded, and reversible; the cluster cannot drift; and nothing outside the cluster holds the keys to change it. The imperative `kubectl` of Chapter 9 was the right way to *learn* Kubernetes; GitOps is the right way to *run* it.
 
@@ -199,7 +240,8 @@ Step back and notice the shift. Deployment is no longer an action a person takes
 -   **GitOps** makes a Git repo the single source of truth for cluster state and runs an in-cluster controller that continuously reconciles the live cluster to match it --- pull-based, not push-based.
 -   It buys four things at once: a reviewed, audited history (deploys are commits), trivial rollback (`git revert`), no cluster credentials in CI, and automatic drift correction.
 -   **ArgoCD**'s core object is the **Application**, mapping a Git repo + path to a destination namespace; it renders Kustomize/Helm, applies the diff, and reports **Synced** and **Healthy** status natively.
--   Keep a separate **config repository** for manifests (the Chapter 9 YAML), structured with Kustomize as `base` plus per-environment `overlays`, so deployment changes don't churn the application repo.
+-   Keep a separate **config repository** for manifests (the Chapter 9 YAML), structured with Kustomize as `base` plus per-environment `overlays`, so deployment changes don't churn the application repo. Base manifests use placeholder image names (`snapvault/<svc>`) that the overlay's `images:` list maps to real, tagged images.
+-   Third-party software like **NATS** gets its own Application pointing directly at its Helm chart, so the broker is under GitOps too.
 -   Install ArgoCD with `kubectl apply --server-side --force-conflicts` (the CRDs are too large for client-side apply); better, **bootstrap it from Terraform's Helm provider** so Terraform's only workload is ArgoCD and Git drives the rest.
 -   An Application with `automated` sync (`prune` + `selfHeal`) means a commit is the deploy and the cluster can't drift; **`ignoreDifferences` on `/spec/replicas`** is mandatory so ArgoCD doesn't fight the HPA from Chapter 14.
 -   Scale to many apps and environments with an **ApplicationSet** (or App of Apps) generated from one template.

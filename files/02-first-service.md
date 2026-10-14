@@ -11,7 +11,7 @@ $ go version
 go version go1.26.0 linux/amd64
 ```
 
-Any 1.26.x patch release is fine. If you're on an older Go, upgrade --- we use a couple of 1.26 conveniences, and the toolchain directive in our module will refuse to build on anything older anyway.
+Any 1.26.x patch release is fine. If you're on an older Go, upgrade --- the `go 1.26.0` line in our module requires it, so an older toolchain will either download 1.26 for you or refuse to build.
 
 ::: tip
 **Let the toolchain manage itself.** Since Go 1.21, a `go` line like `go 1.26.0` in `go.mod` is not just documentation --- if your installed Go is newer, it's used; if a matching toolchain isn't present, the `go` command can download the right one automatically. You rarely need to install Go versions by hand anymore.

@@ -211,11 +211,16 @@ The images service now calls `storage.NewFromEnv(ctx)` instead of constructing i
 
 ## Publishing the upload event
 
-With the contract and connection in place, the images service's upload handler gains one responsibility: after storing the original, announce it. The handler now closes over a `jetstream.JetStream` as well as the store:
+With the contract and connection in place, the images service's upload handler gains one responsibility: after storing the original, announce it. The handler now closes over a `jetstream.JetStream` as well as the store, and keeps Chapter 5's size limit:
 
 ``` go
 func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
+        r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+        if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+            http.Error(w, "invalid upload", http.StatusBadRequest)
+            return
+        }
         file, hdr, err := r.FormFile("image")
         if err != nil {
             http.Error(w, "expected an 'image' file field", http.StatusBadRequest)
@@ -223,9 +228,17 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
         }
         defer file.Close()
 
+        owner := r.FormValue("owner")
+        if owner == "" {
+            owner = "anonymous"
+        }
+
         id := newID()
         key := "originals/" + id
         ct := hdr.Header.Get("Content-Type")
+        if ct == "" {
+            ct = "application/octet-stream"
+        }
         if err := blobs.Put(r.Context(), key, ct, file); err != nil {
             log.Error("store upload", "id", id, "err", err)
             http.Error(w, "could not store image", http.StatusInternalServerError)
@@ -234,7 +247,7 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
 
         evt := events.ImageUploaded{
             ID:           id,
-            Owner:        r.FormValue("owner"),
+            Owner:        owner,
             ObjectName:   key,
             ContentType:  ct,
             OriginalName: hdr.Filename,
@@ -249,10 +262,13 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
         }
 
         w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusCreated)
         _ = json.NewEncoder(w).Encode(map[string]string{"id": id})
     }
 }
 ```
+
+`owner` is whatever the client sends in the form --- there is no login, so nothing stops a client from claiming to be someone else. That's acceptable for learning the architecture; Chapter 14 comes back to what a real deployment needs.
 
 Publishing to a JetStream stream blocks until the broker has *persisted* the message and acknowledged it, so a successful `Publish` means the event is durably stored and will be delivered even if every consumer is currently down. The user's upload is complete and announced; the rest of the system will catch up on its own schedule.
 
@@ -349,6 +365,8 @@ func main() {
 ```
 
 The consumer configuration encodes the worker's reliability policy. `AckExplicitPolicy` means a message is only done when we call `Ack`. `AckWait: 30s` means if we haven't acked within thirty seconds the broker assumes we died and redelivers. `MaxDeliver: 5` caps redelivery attempts so a permanently broken message doesn't loop forever. And because the consumer is `Durable: "thumbnailer"`, a restarted worker resumes exactly where it left off.
+
+The durable consumer also gives us scaling for free. Run two or ten copies of the worker and they all bind to the same `thumbnailer` consumer; JetStream hands each message to exactly one of them. This is the **competing consumers** pattern: adding workers adds throughput, with no coordination code at all. Chapters 9 and 14 lean on it.
 
 The actual image work lives in `services/thumbnails/thumbnail.go`:
 
@@ -465,8 +483,13 @@ cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
     Durable:       "metadata",
     FilterSubject: events.SubjectUploaded,
     AckPolicy:     jetstream.AckExplicitPolicy,
+    AckWait:       30 * time.Second,
+    MaxDeliver:    5,
 })
-// ...
+if err != nil {
+    log.Error("create consumer", "err", err)
+    os.Exit(1)
+}
 cc, err := cons.Consume(func(msg jetstream.Msg) {
     var ev events.ImageUploaded
     if err := json.Unmarshal(msg.Data(), &ev); err != nil {
@@ -474,10 +497,13 @@ cc, err := cons.Consume(func(msg jetstream.Msg) {
         return
     }
     m := ImageMeta{
-        ID:         ev.ID,
-        Owner:      ev.Owner,
-        Title:      ev.OriginalName,
-        UploadedAt: ev.UploadedAt,
+        ID:           ev.ID,
+        Owner:        ev.Owner,
+        ContentType:  ev.ContentType,
+        OriginalName: ev.OriginalName,
+        Size:         ev.Size,
+        Tags:         tagsFor(ev),
+        UploadedAt:   ev.UploadedAt,
     }
     if err := store.Upsert(ctx, m); err != nil {
         log.Error("upsert metadata", "id", ev.ID, "err", err)
@@ -486,29 +512,69 @@ cc, err := cons.Consume(func(msg jetstream.Msg) {
     }
     _ = msg.Ack()
 })
+if err != nil {
+    log.Error("start consume", "err", err)
+    os.Exit(1)
+}
 defer cc.Stop()
 // ... then httpx.Serve(...) blocks, serving GET /metadata reads.
 ```
 
-The feed service is the interesting one, because it cares about *both* events. It subscribes to the whole stream (`images.>`) and switches on the subject: an `uploaded` event adds a feed row; a `thumbnailed` event fills in the thumbnail URL. Add a small update method to the feed store first:
+`tagsFor` derives a starter tag from the content type --- `jpeg`, `png`, `gif` --- so the `GET /metadata?tag=` query from Chapter 5 has something to match:
 
 ``` go
-func (s *feedStore) SetThumb(ctx context.Context, id, thumbURL string) error {
-    _, err := s.pool.Exec(ctx,
-        `UPDATE feed_items SET thumb_url = $2 WHERE id = $1`, id, thumbURL)
-    return err
+// tagsFor tags an image by its media subtype, e.g. "image/png" -> "png".
+func tagsFor(ev events.ImageUploaded) []string {
+    _, sub, ok := strings.Cut(ev.ContentType, "/")
+    if !ok {
+        return nil
+    }
+    sub, _, _ = strings.Cut(sub, ";")
+    if sub = strings.ToLower(strings.TrimSpace(sub)); sub != "" {
+        return []string{sub}
+    }
+    return nil
 }
 ```
 
-Then the consumer dispatches by subject:
+User-supplied tags would arrive the same way: a new optional field on `ImageUploaded`, filled in by the upload form. Adding a field is a backward-compatible change to the contract, which is exactly how the note above says to evolve it.
+
+The feed service is the interesting one, because it cares about *both* events. It subscribes to the whole stream (`images.>`) and switches on the subject: an `uploaded` event adds a feed row; a `thumbnailed` event fills in the thumbnail columns. That second write raises an ordering question: what if the `thumbnailed` event is handled before the row exists? It happens more easily than you'd think. With two feed replicas (Chapter 9 runs two), the two events for one image can land on different Pods at the same moment; and if the `uploaded` write fails once and is `Nak`ed, its redelivery comes *after* the thumbnail. A plain `UPDATE` would match zero rows, report success, and the thumbnail would be acknowledged and lost for good. So `SetThumb` reports a missing row as an error of its own:
 
 ``` go
-cons, _ := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+// errNoFeedItem reports that the matching images.uploaded event has not been
+// applied yet.
+var errNoFeedItem = errors.New("feed item does not exist yet")
+
+func (s *feedStore) SetThumb(ctx context.Context, id, thumbObject string, w, h int) error {
+    tag, err := s.pool.Exec(ctx,
+        `UPDATE feed_items SET thumb_object = $2, width = $3, height = $4
+         WHERE id = $1`, id, thumbObject, w, h)
+    if err != nil {
+        return err
+    }
+    if tag.RowsAffected() == 0 {
+        return errNoFeedItem
+    }
+    return nil
+}
+```
+
+Then the consumer dispatches by subject, and answers that particular error with a *delayed* `Nak`, giving the upload event time to land before the next attempt:
+
+``` go
+cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
     Durable:       "feed",
     FilterSubject: events.SubjectWildcard, // images.>
     AckPolicy:     jetstream.AckExplicitPolicy,
+    AckWait:       30 * time.Second,
+    MaxDeliver:    5,
 })
-cc, _ := cons.Consume(func(msg jetstream.Msg) {
+if err != nil {
+    log.Error("create consumer", "err", err)
+    os.Exit(1)
+}
+cc, err := cons.Consume(func(msg jetstream.Msg) {
     switch msg.Subject() {
     case events.SubjectUploaded:
         var ev events.ImageUploaded
@@ -517,8 +583,7 @@ cc, _ := cons.Consume(func(msg jetstream.Msg) {
             return
         }
         err := store.Add(ctx, FeedItem{
-            ID: ev.ID, Owner: ev.Owner,
-            Title: ev.OriginalName, CreatedAt: ev.UploadedAt,
+            ID: ev.ID, Owner: ev.Owner, UploadedAt: ev.UploadedAt,
         })
         ackOrNak(msg, err, log)
     case events.SubjectThumbnailed:
@@ -527,19 +592,27 @@ cc, _ := cons.Consume(func(msg jetstream.Msg) {
             _ = msg.Term()
             return
         }
-        err := store.SetThumb(ctx, ev.ID, "/images/thumbs/"+ev.ID+".jpg")
+        err := store.SetThumb(ctx, ev.ID, ev.ThumbObject, ev.Width, ev.Height)
+        if errors.Is(err, errNoFeedItem) {
+            _ = msg.NakWithDelay(5 * time.Second) // row not there yet; try later
+            return
+        }
         ackOrNak(msg, err, log)
     default:
         _ = msg.Ack() // a subject we don't handle; consume and ignore
     }
 })
+if err != nil {
+    log.Error("start consume", "err", err)
+    os.Exit(1)
+}
 defer cc.Stop()
 ```
 
-where `ackOrNak` is the obvious helper that `Ack`s on success and `Nak`s on error. This service is now a clean example of a **read model** built from events: it listens to what happened across the system and maintains a Postgres table shaped exactly for the one query it serves. That is the essence of the pattern often called CQRS --- the feed never queries another service to render the gallery; it has already assembled everything it needs from the event stream.
+where `ackOrNak` is the obvious helper that `Ack`s on success and `Nak`s on error. The feed stores the thumbnail's object key (`thumbs/<id>.jpg`), not a URL: how that key is served is the gateway's business, and it can change without touching a single feed row. This service is now a clean example of a **read model** built from events: it listens to what happened across the system and maintains a Postgres table shaped exactly for the one query it serves. That is the essence of the pattern often called CQRS --- the feed never queries another service to render the gallery; it has already assembled everything it needs from the event stream.
 
 ::: note
-**Eventual consistency, in the flesh.** A subtle ordering question lurks here: what if `thumbnailed` is processed before the `uploaded` row exists? In practice it cannot get far ahead --- making a thumbnail requires downloading, decoding, resizing, and re-uploading, so `uploaded` is essentially always persisted first --- and even in the worst case `SetThumb` simply updates zero rows and the feed shows that image without a thumbnail for a moment. This is *eventual consistency*: the system is briefly not-quite-right and then becomes right, with no data lost. Designing so that "briefly wrong, then correct" is acceptable --- rather than demanding "always perfectly consistent across services," which distributed systems cannot cheaply provide --- is the central mental shift of event-driven architecture.
+**Eventual consistency, in the flesh.** For a few moments after an upload, the feed may show the image without a thumbnail, and a thumbnail event may even arrive before the row it belongs to. Neither is an error. The delayed `Nak` above turns "arrived too early" into "applied a few seconds later," and the image is then fully in place. This is *eventual consistency*: the system is briefly not-quite-right and then becomes right, with no data lost. Notice that "no data lost" had to be *engineered*: the first, naive version of `SetThumb` silently dropped early thumbnails. Every handler in an event-driven system deserves the question "what if this arrives first?" Designing so that "briefly wrong, then correct" is acceptable --- rather than demanding "always perfectly consistent across services," which distributed systems cannot cheaply provide --- is the central mental shift of event-driven architecture.
 :::
 
 ## Wiring NATS into Compose
@@ -578,13 +651,14 @@ volumes:
 
 Locally the thumbnails worker and images service share one disk volume so both see the same `originals/` and `thumbs/` keys; in the cloud they'll share a GCS bucket instead, with no code change.
 
-To exercise the system end to end, the gateway grows a couple more proxy routes alongside the `/images/` one from Chapter 4 --- `POST /api/images` forwarding to the images service and `GET /api/feed` forwarding to the feed service, each just another `httputil.NewSingleHostReverseProxy` pointed at the right internal URL (we'll round out this aggregation in Chapter 14). Bring it all up with `docker compose up --build`, then watch the whole pipeline fire from a single upload:
+To exercise the system end to end, the gateway grows a few more routes alongside the `/images/` one from Chapter 4 --- `GET /thumbs/{name}` proxied to the images service, `POST /api/images` forwarded to the images service's `POST /images`, and `GET /api/feed` forwarded to the feed service's `GET /feed`. Each is just another `httputil.NewSingleHostReverseProxy` pointed at the right internal URL (the feed one reads a new `FEED_URL` setting, `http://feed:8080` in Compose); we'll round out the gateway with real aggregation in Chapter 14. Bring it all up with `docker compose up --build`, then watch the whole pipeline fire from a single upload:
 
 ``` bash
 $ curl -F "image=@photo.jpg" -F "owner=ada" http://localhost:8080/api/images
-{"id":"6f1c...":}
+{"id":"6f1c..."}
 $ curl http://localhost:8080/api/feed
-[{"id":"6f1c...","owner":"ada","title":"photo.jpg","thumb_url":"/images/thumbs/6f1c....jpg",...}]
+[{"id":"6f1c...","owner":"ada","thumb_object":"thumbs/6f1c....jpg","width":320,"height":240,...}]
+$ curl -o thumb.jpg http://localhost:8080/thumbs/6f1c....jpg
 ```
 
 In the interleaved logs you'll see the sequence play out across services: images logs the upload and publish, thumbnails logs the thumbnail it created, and both metadata and feed log their writes --- four services cooperating, none of them aware of the others, coordinated entirely by events on a stream.
