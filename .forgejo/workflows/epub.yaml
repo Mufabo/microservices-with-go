@@ -1,12 +1,15 @@
 name: epub
 
-# Rebuild Microservices-in-Go.epub whenever the book source changes, and commit
-# the result back so the tracked EPUB never drifts from files/.
+# Rebuild Microservices-in-Go.epub and files/book-src.zip whenever the book
+# source changes, and commit them back so neither drifts from files/. build.sh
+# is reproducible, so this only commits when the book actually changed, and a
+# local build with the pinned Pandoc matches CI's byte for byte.
 on:
   push:
     branches: [main]
     paths:
       - 'files/**'
+      - '!files/book-src.zip' # generated here; committing it shouldn't re-trigger
       - '.forgejo/workflows/epub.yaml'
   workflow_dispatch:
 
@@ -15,10 +18,6 @@ jobs:
     runs-on: docker
     container:
       image: ghcr.io/catthehacker/ubuntu:act-latest
-    env:
-      # build.sh needs Pandoc 3.x; the distro package is 2.x, so install the
-      # upstream .deb. Bump this pin deliberately.
-      PANDOC_VERSION: "3.5"
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
         with:
@@ -28,28 +27,32 @@ jobs:
           token: ${{ secrets.EPUB_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Install Pandoc
+        # The distro package is too old, so install the upstream .deb. The
+        # version is pinned in files/build.sh; bump it there, deliberately.
         run: |
+          PANDOC_VERSION=$(sed -n 's/^PANDOC_VERSION=//p' files/build.sh)
           curl -sSfLO "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
           apt-get install -y "./pandoc-${PANDOC_VERSION}-1-amd64.deb"
           rm "pandoc-${PANDOC_VERSION}-1-amd64.deb"
 
-      - name: Build the EPUB
-        # build.sh writes next to the sources; the published copy lives at the
-        # repo root.
+      - name: Build the EPUB and the source bundle
+        # build.sh writes next to the sources; the published EPUB lives at the
+        # repo root, and book-src.zip stays in files/.
         run: |
           cd files
           ./build.sh
           mv Microservices-in-Go.epub ..
 
-      - name: Commit the rebuilt EPUB
+      - name: Commit the rebuilt outputs
         run: |
           git config user.name "forgejo-actions"
           git config user.email "forgejo-actions@noreply.codeberg.org"
-          if git diff --quiet -- Microservices-in-Go.epub; then
-            echo "EPUB unchanged; nothing to commit."
+          if git diff --quiet -- Microservices-in-Go.epub files/book-src.zip; then
+            echo "EPUB and source bundle unchanged; nothing to commit."
             exit 0
           fi
-          git commit -m "build: rebuild EPUB from ${GITHUB_SHA::8}" -- Microservices-in-Go.epub
+          git commit -m "build: rebuild EPUB from ${GITHUB_SHA::8}" \
+            -- Microservices-in-Go.epub files/book-src.zip
           git push origin HEAD:main
 
       - name: Publish the EPUB as a release

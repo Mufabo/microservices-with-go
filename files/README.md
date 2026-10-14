@@ -8,7 +8,8 @@ These are the individual source files that build the EPUB
 ```
 metadata.yaml            # EPUB metadata (title, author, rights, description)
 epub.css                 # stylesheet, including the note/tip/warning asides
-build.sh                 # the pandoc command that assembles the EPUB
+build.sh                 # builds the EPUB and book-src.zip (pins the Pandoc version)
+book-src.zip             # generated: these sources as one download
 00-about.md              # front matter
 01..14-*.md              # Chapters 1–14
 15-appendix.md           # command reference appendix
@@ -24,18 +25,23 @@ Chapters are plain Pandoc Markdown. Two conventions to know:
 
 ## Rebuild
 
-Install Pandoc 3.x, then:
+Install the Pandoc version pinned at the top of `build.sh` (currently 3.12;
+other 3.x releases work but print a warning), plus Python 3, then:
 
 ```sh
 ./build.sh
 ```
 
-This produces `Microservices-in-Go.epub`. Convert onward to PDF or HTML with
-Pandoc as well, e.g. `pandoc … -o book.html`.
+This produces `Microservices-in-Go.epub` and regenerates `book-src.zip`. The
+build is reproducible: with the pinned Pandoc, the same sources always give
+byte-identical files, here and in CI. Convert onward to PDF or HTML with Pandoc
+as well, e.g. `pandoc … -o book.html`.
 
 Pushing a change under `files/` to `main` also triggers `.forgejo/workflows/epub.yaml`,
-which runs this same script, commits the rebuilt `Microservices-in-Go.epub`
-back to the repository root, and attaches it to the rolling `latest` release.
+which runs this same script and commits the rebuilt `Microservices-in-Go.epub`
+(at the repository root) and `book-src.zip` if they changed. It also attaches
+the EPUB to the rolling `latest` release. If you commit the outputs of your own
+build together with the sources, CI finds nothing to change.
 
 ## Provenance
 

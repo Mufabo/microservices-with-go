@@ -113,7 +113,20 @@ func FileOrEnv(key string) string {
 }
 ```
 
-Both services that hold a secret switch to it: the feed service calls `config.FileOrEnv("DATABASE_URL")`, and the metadata service calls `config.FileOrEnv("MONGO_URI")` in place of the `config.MustString("MONGO_URI")` it used until now. Because `FileOrEnv` returns an empty string when neither variable is set, metadata checks for that and exits, keeping the fail-fast behavior `MustString` gave it. In the cluster, `DATABASE_URL_FILE=/secrets/database-url` and `MONGO_URI_FILE=/secrets/mongo-uri` point at the mounted files; on a laptop, `DATABASE_URL` and `MONGO_URI` hold the local connection strings. The code stays portable; only the source of the secret changes.
+Both services that hold a secret switch to it: the feed service calls `config.FileOrEnv("DATABASE_URL")`, and the metadata service calls `config.FileOrEnv("MONGO_URI")` in place of the `config.MustString("MONGO_URI")` it used until now. Because `FileOrEnv` returns an empty string when neither variable is set, metadata checks for that and exits, keeping the fail-fast behavior `MustString` gave it.
+
+That switch is easy to forget for the *next* secret someone adds, and forgetting fails silently: a service that reads its secret with plain `MustString` never looks at the mounted file. So close the trap in `config` itself and make `MustString` file-aware too:
+
+``` go
+func MustString(key string) string {
+    if v := FileOrEnv(key); v != "" {
+        return v
+    }
+    panic("config: required environment variable " + key + " (or " + key + "_FILE) is not set")
+}
+```
+
+Now a required value is read the same way whichever helper a service uses, and the code paths can't drift apart. In the cluster, `DATABASE_URL_FILE=/secrets/database-url` and `MONGO_URI_FILE=/secrets/mongo-uri` point at the mounted files; on a laptop, `DATABASE_URL` and `MONGO_URI` hold the local connection strings. The code stays portable; only the source of the secret changes.
 
 ## Resilience: surviving partial failure
 

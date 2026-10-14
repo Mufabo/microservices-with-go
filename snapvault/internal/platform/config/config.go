@@ -16,12 +16,14 @@ func String(key, def string) string {
 }
 
 // MustString returns the value of key, or panics if it is unset or empty.
-// Use it for configuration a service cannot run without.
+// Use it for configuration a service cannot run without. Like FileOrEnv, it
+// reads the file named by key+"_FILE" when that is set, so a required secret
+// mounted as a file works no matter which helper reads it.
 func MustString(key string) string {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
+	if v := FileOrEnv(key); v != "" {
 		return v
 	}
-	panic("config: required environment variable " + key + " is not set")
+	panic("config: required environment variable " + key + " (or " + key + "_FILE) is not set")
 }
 
 // Int returns the integer value of key, or def if it is unset or invalid.
