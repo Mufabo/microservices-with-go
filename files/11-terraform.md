@@ -232,6 +232,11 @@ resource "google_sql_database_instance" "feed" {
       enabled                        = true
       point_in_time_recovery_enabled = true
     }
+    # A public IP with no authorized networks: nothing can connect directly.
+    # Pods connect through the Cloud SQL Auth Proxy (below).
+    ip_configuration {
+      ipv4_enabled = true
+    }
   }
 
   deletion_protection = true
@@ -241,11 +246,49 @@ resource "google_sql_database" "snapvault" {
   name     = "snapvault"
   instance = google_sql_database_instance.feed.name
 }
+
+# Let the runtime identity open connections through the Auth Proxy.
+resource "google_project_iam_member" "runtime_cloudsql" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+output "cloudsql_connection_name" {
+  value = google_sql_database_instance.feed.connection_name
+}
 ```
 
 `point_in_time_recovery_enabled` and automated backups are exactly the operational properties we did *not* want to build ourselves --- declaring `enabled = true` is the entire reason to use a managed database. `deletion_protection` guards against an accidental `terraform destroy` taking the production database with it.
 
-The connection string, with its password, is a secret. Store it in **Secret Manager** so the cluster can pull it at runtime (Chapter 14) instead of carrying a hand-created Kubernetes Secret:
+A database is only useful if the feed Pods can reach it, and the instance above deliberately accepts no direct connections. The standard way in from GKE is the **Cloud SQL Auth Proxy**: a small container running next to the feed service in the same Pod. It authenticates as the Pod's Google identity (hence `roles/cloudsql.client` on the runtime account), opens an encrypted connection to the instance, and listens on `127.0.0.1:5432`. The feed service just connects to localhost. Add it to the feed Deployment as a *native sidecar* --- an init container with `restartPolicy: Always`, which starts before the main container and runs alongside it:
+
+``` yaml
+    spec:
+      serviceAccountName: snapvault
+      initContainers:
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+          restartPolicy: Always
+          args:
+            - --port=5432
+            - PROJECT_ID:us-central1:snapvault-feed   # cloudsql_connection_name
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+      containers:
+        - name: feed
+          # ... as before
+```
+
+(The alternative is a private IP, which needs VPC peering between your network and Google's service network --- more moving parts, and worth it mainly when you have many clients or a policy against public endpoints.)
+
+The database also needs a user. Create it out of band, so the password never enters Terraform state:
+
+``` bash
+$ gcloud sql users create snapvault --instance=snapvault-feed --password="$DB_PASSWORD"
+```
+
+The connection string, with that password, is a secret. Because the proxy listens inside the Pod, it reads `postgres://snapvault:PASSWORD@127.0.0.1:5432/snapvault?sslmode=disable` --- `sslmode=disable` covers only the loopback hop, and the proxy encrypts everything beyond it. Store it in **Secret Manager** so the cluster can pull it at runtime (Chapter 14) instead of carrying a hand-created Kubernetes Secret:
 
 ``` hcl
 resource "google_secret_manager_secret" "database_url" {
@@ -254,7 +297,7 @@ resource "google_secret_manager_secret" "database_url" {
 }
 ```
 
-You write the secret's value out of band --- Terraform should declare that the secret *exists*, not bake the password into state. MongoDB Atlas is provisioned the same way through its own Terraform provider (`mongodb/mongodbatlas`); it's outside our scope here, but the pattern is identical: declare the cluster, capture the connection string as a Secret Manager secret.
+You write the secret's value out of band too --- Terraform should declare that the secret *exists*, not bake the password into state. MongoDB Atlas is provisioned the same way through its own Terraform provider (`mongodb/mongodbatlas`); it's outside our scope here, but the pattern is identical: declare the cluster, capture the connection string as a Secret Manager secret.
 
 ## The workflow
 
@@ -281,6 +324,7 @@ As the file count grows, group related resources into **modules** --- a `module 
 -   Snapvault's whole environment becomes code: the **uploads bucket**, the **Artifact Registry** repo, the **GKE Autopilot cluster**, **Cloud SQL**, service accounts, and Secret Manager secrets.
 -   **Workload Identity** binds the Kubernetes `snapvault` service account to a Google service account, giving Pods keyless Cloud Storage access --- the mechanism behind Chapter 5's Application Default Credentials.
 -   The **Workload Identity Federation** pool and provider establish keyless CI trust scoped to your repo with an `attribute_condition` --- the one-time setup Chapter 8 assumed.
+-   Pods reach **Cloud SQL** through the **Cloud SQL Auth Proxy** sidecar, authenticated by workload identity (`roles/cloudsql.client`), so the instance accepts no direct connections.
 -   Declare that **secrets exist** in Secret Manager and write their values out of band; never bake passwords into Terraform state.
 -   Keep a clean boundary: Terraform owns infrastructure, Kubernetes manifests own workloads. Reach for **modules** only when repetition across environments actually hurts.
 

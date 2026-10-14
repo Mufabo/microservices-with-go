@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -71,5 +72,32 @@ func TestFeedStore_AddIsIdempotentAndThumbAttaches(t *testing.T) {
 	}
 	if got.ThumbObject != "thumbs/img1.jpg" || got.Width != 320 || got.Height != 200 {
 		t.Fatalf("thumbnail not attached: %+v", got)
+	}
+
+	// A redelivered upload event must not erase the thumbnail.
+	if err := store.Add(ctx, item); err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	got, err = store.Get(ctx, "img1")
+	if err != nil {
+		t.Fatalf("get after re-add: %v", err)
+	}
+	if got.ThumbObject != "thumbs/img1.jpg" {
+		t.Fatalf("re-adding the upload erased the thumbnail: %+v", got)
+	}
+}
+
+func TestFeedStore_SetThumbBeforeAddReportsMissingRow(t *testing.T) {
+	ctx := context.Background()
+	store, err := newFeedStore(ctx, startPostgres(ctx, t))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	// The consumer relies on this error to retry instead of losing the thumbnail.
+	err = store.SetThumb(ctx, "early", "thumbs/early.jpg", 10, 10)
+	if !errors.Is(err, errNoFeedItem) {
+		t.Fatalf("SetThumb on a missing row: err = %v, want errNoFeedItem", err)
 	}
 }

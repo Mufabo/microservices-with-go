@@ -44,9 +44,9 @@ Tagging and pushing to Artifact Registry (Chapter 8):
 ``` bash
 $ gcloud auth configure-docker us-central1-docker.pkg.dev
 $ docker tag snapvault/images:dev \
-    us-central1-docker.pkg.dev/$PROJECT_ID/snapvault/images:$(git rev-parse --short HEAD)
+    us-central1-docker.pkg.dev/$PROJECT_ID/snapvault/images:$(git rev-parse HEAD)
 $ docker push \
-    us-central1-docker.pkg.dev/$PROJECT_ID/snapvault/images:$(git rev-parse --short HEAD)
+    us-central1-docker.pkg.dev/$PROJECT_ID/snapvault/images:$(git rev-parse HEAD)
 ```
 
 ## Docker Compose
@@ -79,7 +79,7 @@ $ nats pub images.uploaded '{"id":"test"}'   # publish a test event
 $ nats stream view IMAGES          # browse stored messages
 ```
 
-The `consumer info` pending count is the queue-depth signal we autoscale the thumbnailer on in Chapter 14.
+The `consumer info` pending count is the thumbnailer's queue depth --- the backlog Chapters 13 and 14 discuss monitoring and scaling on.
 
 ## kubectl
 
@@ -180,7 +180,8 @@ A typical change is: edit a `.tf` file, `terraform fmt && terraform validate`, o
 The commands the pipeline and your tagging rely on (Chapter 8).
 
 ``` bash
-$ git rev-parse --short HEAD    # the short SHA used as an image tag
+$ git rev-parse HEAD            # the full SHA CI uses as the image tag
+$ git rev-parse --short HEAD    # a short form, for reading — not for tags
 $ git tag v1.4.0 && git push --tags   # cut a release (adds a semver tag)
 ```
 

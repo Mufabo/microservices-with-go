@@ -14,7 +14,7 @@ Go and containers are an especially happy pairing, for the reason Chapter 1 ment
 
 The key technique is the **multi-stage build**. We use a large image containing the full Go toolchain to compile our binary, then copy just that binary into a tiny final image and throw the toolchain away. The compiler never ships to production.
 
-Create `services/images/Dockerfile`:
+Create a `Dockerfile` at the repository root --- not inside `services/images/`, because this one file will build every service:
 
 ``` dockerfile
 # syntax=docker/dockerfile:1
@@ -66,7 +66,7 @@ Add a `.dockerignore` at the repository root so the build context stays small an
 Build the image from the repository root (the `.` at the end is the build context --- the whole repo, which the multi-stage build needs because the module spans `services/` and `internal/`):
 
 ``` bash
-$ docker build -f services/images/Dockerfile -t snapvault/images:dev .
+$ docker build --build-arg SERVICE=images -t snapvault/images:dev .
 ```
 
 Check how small it came out:

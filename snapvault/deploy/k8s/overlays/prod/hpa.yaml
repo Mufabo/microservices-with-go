@@ -37,12 +37,17 @@ spec:
           type: Utilization
           averageUtilization: 70
     # Alternatively, scale on the JetStream consumer's pending-message count
-    # via an external metric (requires the custom-metrics Stackdriver adapter):
+    # via an external metric. Requires prometheus-nats-exporter (scraped by
+    # Managed Prometheus) and the Custom Metrics Stackdriver Adapter; check the
+    # metric and label names against the exporter's /metrics output.
     #
     # - type: External
     #   external:
     #     metric:
-    #       name: custom.googleapis.com|nats|consumer|num_pending
+    #       name: prometheus.googleapis.com|jetstream_consumer_num_pending|gauge
+    #       selector:
+    #         matchLabels:
+    #           metric.labels.consumer_name: thumbnailer
     #     target:
     #       type: AverageValue
     #       averageValue: "30"

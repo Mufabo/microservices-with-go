@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	_ "image/gif"  // register the GIF decoder
-	"image/jpeg"   // JPEG encoder (and registers the JPEG decoder)
-	_ "image/png"  // register the PNG decoder
+	_ "image/gif" // register the GIF decoder
+	"image/jpeg"  // JPEG encoder (and registers the JPEG decoder)
+	_ "image/png" // register the PNG decoder
 	"io"
 
 	"golang.org/x/image/draw"

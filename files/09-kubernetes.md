@@ -57,6 +57,25 @@ $ kubectl config set-context --current --namespace=snapvault
 
 The second command makes `snapvault` the default namespace for the rest of our `kubectl` commands, so we can drop `-n snapvault` everywhere.
 
+Two more pieces must exist before any Pod can start. The first is the Cloud Storage bucket the images and thumbnails services will share; locally that was a Compose volume, but Pods need storage that outlives them. Bucket names are global, so pick your own:
+
+``` bash
+$ gcloud storage buckets create gs://snapvault-uploads-prod \
+    --project="$PROJECT_ID" --location=us-central1 \
+    --uniform-bucket-level-access
+```
+
+The second is a Kubernetes **ServiceAccount** for our Pods. Every Deployment below runs as `snapvault`, and a Pod that names a ServiceAccount which doesn't exist is never created. Save `k8s/serviceaccount.yaml`:
+
+``` yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: snapvault
+```
+
+For now it's an empty identity. In Chapter 11 we bind it to a Google service account so the Pods can reach the bucket without a key file; until then, uploads to GCS will fail with a permission error, which is a useful reminder of what that binding does.
+
 ## Configuration and secrets
 
 Our services read configuration from the environment. In the cluster, the non-secret half lives in a ConfigMap. Create `k8s/config.yaml`:
@@ -69,21 +88,25 @@ metadata:
 data:
   NATS_URL: "nats://nats:4222"
   STORAGE: "gcs"
-  GCS_BUCKET: "snapvault-uploads-prod"   # your bucket from Chapter 5/10
+  GCS_BUCKET: "snapvault-uploads-prod"   # the bucket you just created
   MONGO_DB: "snapvault"
   IMAGES_URL: "http://images:8080"
+  METADATA_URL: "http://metadata:8080"
+  FEED_URL: "http://feed:8080"
   LOG_LEVEL: "info"
 ```
 
-Those values mirror what we had in Compose, with two changes that matter. `NATS_URL` now points at `nats`, the in-cluster Service we'll create shortly, and `IMAGES_URL` points at the `images` Service --- the same DNS-by-name pattern, just inside Kubernetes. `STORAGE` is `gcs` because in a real cluster we use Cloud Storage, not a local disk that vanishes when a Pod is rescheduled.
+Those values mirror what we had in Compose, with two changes that matter. `NATS_URL` now points at `nats`, the in-cluster Service we'll create shortly, and the three `*_URL` entries the gateway needs point at the `images`, `metadata`, and `feed` Services --- the same DNS-by-name pattern, just inside Kubernetes. (The gateway refuses to start without `IMAGES_URL` and `FEED_URL`, and Chapter 14's aggregation reads `METADATA_URL`.) `STORAGE` is `gcs` because in a real cluster we use Cloud Storage, not a local disk that vanishes when a Pod is rescheduled.
 
 Connection strings carrying credentials are secrets, not config. Never put a database password in a ConfigMap; ConfigMaps are not encrypted and are readable by anyone with cluster read access. Create a Secret instead. You can do it imperatively so the values never sit in a file in your repo:
 
 ``` bash
 $ kubectl create secret generic snapvault-secrets \
     --from-literal=MONGO_URI='mongodb+srv://USER:PASS@cluster0.example.mongodb.net' \
-    --from-literal=DATABASE_URL='postgres://USER:PASS@10.0.0.3:5432/snapvault?sslmode=require'
+    --from-literal=DATABASE_URL='postgres://USER:PASS@DB_HOST:5432/snapvault?sslmode=require'
 ```
+
+`DB_HOST` is wherever your Postgres is reachable from the cluster. Chapter 11 provisions Cloud SQL and connects to it through the Cloud SQL Auth Proxy, at which point this becomes `127.0.0.1`.
 
 ::: warning
 A Kubernetes Secret is only **base64-encoded**, not encrypted, in its default form --- it keeps credentials out of your manifests and out of plain sight, but it is not strong protection on its own. GKE encrypts Secret data at rest, and in Chapter 14 we'll graduate to pulling these values from Google Secret Manager via Workload Identity so they never live in the cluster as a Secret at all. For now, a Secret created imperatively is a reasonable starting point.
@@ -152,11 +175,12 @@ spec:
 
 There is a lot here, but almost all of it we've already justified. `replicas: 2` runs two copies of the images service; the Deployment keeps both alive and load-balances across them. The `image` is the exact one CI pushed to Artifact Registry in Chapter 8 --- pinned to a commit SHA, never `:latest`, so the cluster runs a known, immutable build. `envFrom` injects the ConfigMap and Secret as environment variables wholesale, which is why our `config.MustString("NATS_URL")` and the rest simply work. The two probes point at the health endpoints we built in Chapter 2: if `/health/live` stops responding the container is restarted; if `/health/ready` returns 503 the Pod is pulled out of the Service until it recovers.
 
-The `Service` object below the Deployment is what makes `http://images:8080` resolve from any other Pod. The gateway will reach the images service through it without knowing or caring how many replicas exist or where they're scheduled. `serviceAccountName: snapvault` attaches a Kubernetes service account we'll bind to a Google service account in Chapter 14 so the Pod can reach Cloud Storage without a key file --- the same Application Default Credentials story from Chapter 5, now wired through workload identity.
+The `Service` object below the Deployment is what makes `http://images:8080` resolve from any other Pod. The gateway will reach the images service through it without knowing or caring how many replicas exist or where they're scheduled. `serviceAccountName: snapvault` attaches the ServiceAccount we created above, which Chapter 11 binds to a Google service account so the Pod can reach Cloud Storage without a key file --- the same Application Default Credentials story from Chapter 5, now wired through workload identity.
 
-Apply it and watch the rollout:
+Apply it, together with the ServiceAccount and ConfigMap it depends on, and watch the rollout:
 
 ``` bash
+$ kubectl apply -f k8s/serviceaccount.yaml -f k8s/config.yaml
 $ kubectl apply -f k8s/images.yaml
 $ kubectl rollout status deployment/images
 $ kubectl get pods -l app=images
@@ -285,6 +309,8 @@ $ helm install nats nats/nats --namespace snapvault \
 
 This gives us a `nats` Service on port 4222 --- the address our ConfigMap already points at. A single NATS Pod with JetStream on a persistent volume is enough to run Snapvault; in Chapter 14 we'll turn this into a three-node NATS cluster with replicated streams so the broker itself isn't a single point of failure.
 
+The broker stays a release of its own, named `nats`, for the rest of the book, so `nats://nats:4222` never changes. Chapter 10 shows how a chart *could* bundle it, Chapter 12 hands this release to ArgoCD alongside our services, and Chapter 14 scales it --- always the same release.
+
 ## Databases: managed, not in-cluster
 
 It is tempting to run Postgres and MongoDB in the cluster too, as StatefulSets, mirroring our Compose file. Resist it for production. Databases want careful backups, point-in-time recovery, failover, and version upgrades --- exactly the operational burden managed services exist to carry. Run them outside the cluster: **Cloud SQL** for the feed's PostgreSQL, and **MongoDB Atlas** (or self-managed on a VM if you must) for metadata. The services don't care --- they read `DATABASE_URL` and `MONGO_URI` from the Secret, which now point at managed endpoints instead of in-cluster Pods. This is the one place the cluster topology diverges from Compose on purpose, and it's the right divergence. Provisioning that Cloud SQL instance reproducibly is, again, a job for Chapter 11.
@@ -304,7 +330,7 @@ Scale the thumbnailer up because uploads are surging:
 $ kubectl scale deployment/thumbnails --replicas=4
 ```
 
-Four workers now pull from the same durable consumer, sharing the load --- the competing-consumers pattern from Chapter 6, scaled with one command. Roll out a new version by changing the image tag and applying; the Deployment starts new Pods, waits for them to pass readiness, and only then retires the old ones:
+Four workers now bind to the same durable `thumbnailer` consumer and JetStream hands each message to exactly one of them --- the competing-consumers pattern from Chapter 6, scaled with one command. Roll out a new version by changing the image tag and applying; the Deployment starts new Pods, waits for them to pass readiness, and only then retires the old ones:
 
 ``` bash
 $ kubectl set image deployment/images \

@@ -1,7 +1,8 @@
 -- 001_init.sql — feed service schema.
--- Applied by the CI pipeline against Cloud SQL before deploy. The feed service
--- also creates this schema on startup (idempotently) so local runs need no
--- separate migration step.
+-- The versioned form of the schema, for a migration tool such as
+-- golang-migrate. The feed service also creates this schema on startup
+-- (idempotently), which is all Snapvault currently relies on; keep the two in
+-- sync until a migration step is added to the pipeline.
 
 CREATE TABLE IF NOT EXISTS feed_items (
     id           TEXT PRIMARY KEY,

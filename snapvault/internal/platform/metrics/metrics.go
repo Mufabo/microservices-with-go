@@ -40,14 +40,15 @@ func Middleware(next http.Handler) http.Handler {
 // Handler serves the Prometheus exposition endpoint (wire it at /metrics).
 func Handler() http.Handler { return promhttp.Handler() }
 
-// routeOf returns the matched ServeMux pattern (e.g. "/images/{id}"), falling
-// back to the raw path. Using the pattern keeps per-ID paths from each
-// becoming their own metric series.
+// routeOf returns the matched ServeMux pattern (e.g. "/images/{name}"). Using
+// the pattern keeps per-ID paths from each becoming their own metric series.
+// Unmatched requests (404s) share one label rather than their raw path, which
+// a client could otherwise vary to create unbounded series.
 func routeOf(r *http.Request) string {
 	if p := r.Pattern; p != "" {
 		return p
 	}
-	return r.URL.Path
+	return "unmatched"
 }
 
 type statusRecorder struct {

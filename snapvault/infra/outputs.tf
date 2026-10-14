@@ -23,6 +23,11 @@ output "runtime_service_account" {
   value       = google_service_account.runtime.email
 }
 
+output "cloudsql_connection_name" {
+  description = "Instance connection name for the Cloud SQL Auth Proxy (prod overlay)."
+  value       = google_sql_database_instance.postgres.connection_name
+}
+
 output "gke_cluster" {
   value = google_container_cluster.autopilot.name
 }

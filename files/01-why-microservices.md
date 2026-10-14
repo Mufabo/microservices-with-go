@@ -65,14 +65,14 @@ You could build microservices in almost any language. Several properties make Go
 
 ### What Go 1.26 brings to the table
 
-We target Go 1.26 (released February 2026) specifically, and a few of its changes show up in our code:
+We target Go 1.26 (released February 2026). Snapvault's code doesn't depend on any 1.26-only feature, but a few of its changes are worth knowing about for services like ours:
 
--   **The `new` builtin now takes an expression.** Previously `new` could only allocate a zero value of a type; now `new(expr)` allocates a variable initialized to `expr` and returns a pointer to it. That retires the little `func ptr[T any](v T) *T` helper that every Go codebase grew to populate optional pointer fields. You'll see `new(...)` used this way when we build configuration and request structs.
--   **The Green Tea garbage collector is on by default,** reducing GC overhead for the kind of allocation-heavy, many-small-objects workload a JSON-slinging service produces. You get this for free simply by building with 1.26.
+-   **The Green Tea garbage collector is on by default,** reducing GC overhead for the kind of allocation-heavy, many-small-objects workload a JSON-slinging service produces. This is the one you get without doing anything: every Snapvault service benefits simply by building with 1.26.
+-   **The `new` builtin now takes an expression.** Previously `new` could only allocate a zero value of a type; now `new(expr)` allocates a variable initialized to `expr` and returns a pointer to it. That retires the little `func ptr[T any](v T) *T` helper that many Go codebases grew to populate optional pointer fields.
 -   **`log/slog` gained the ability to fan out to multiple handlers,** which is handy when you want logs going to both your terminal (human-readable) and a structured sink (machine-readable) during development.
 -   **An experimental goroutine-leak profile** (`GOEXPERIMENT=goroutineleakprofile`) can flag goroutines blocked forever on a channel or lock --- a category of bug that distributed Go systems produce with depressing regularity.
 
-None of these are load-bearing for the architecture; they're quality-of-life improvements that make the journey pleasanter. The patterns in this book would work on Go 1.22+; we simply use the newest tools where they help.
+None of these are load-bearing for the architecture; they're quality-of-life improvements. The patterns in this book work on Go 1.22+ (the first release with method-and-path routing in `http.ServeMux`); we target 1.26 to stay current.
 
 ## The shape of the journey
 

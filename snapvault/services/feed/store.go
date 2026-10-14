@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,8 +23,8 @@ type FeedItem struct {
 type feedStore struct{ pool *pgxpool.Pool }
 
 // newFeedStore opens a connection pool and ensures the schema exists. Creating
-// the schema on startup is pragmatic for this example; production uses the
-// versioned migrations in ./migrations applied by the CI pipeline.
+// the schema on startup is pragmatic for this example; a production system
+// would apply the versioned migrations in ./migrations before deploying.
 func newFeedStore(ctx context.Context, dsn string) (*feedStore, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -37,7 +38,7 @@ func newFeedStore(ctx context.Context, dsn string) (*feedStore, error) {
 	return s, nil
 }
 
-func (s *feedStore) Close()                       { s.pool.Close() }
+func (s *feedStore) Close()                         { s.pool.Close() }
 func (s *feedStore) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 // Add inserts a new feed item, ignoring duplicates. The ON CONFLICT clause
@@ -52,13 +53,25 @@ func (s *feedStore) Add(ctx context.Context, it FeedItem) error {
 	return err
 }
 
+// errNoFeedItem reports that SetThumb found no row to attach a thumbnail to,
+// because the matching images.uploaded event has not been applied yet.
+var errNoFeedItem = errors.New("feed item does not exist yet")
+
 // SetThumb attaches thumbnail details to an existing item. Re-applying the
-// same update is harmless, so this too is safe to replay.
+// same update is harmless, so this too is safe to replay. If the row does not
+// exist yet it returns errNoFeedItem instead of silently updating nothing, so
+// the caller can retry once the upload event has been processed.
 func (s *feedStore) SetThumb(ctx context.Context, id, thumbObject string, w, h int) error {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE feed_items SET thumb_object=$2, width=$3, height=$4 WHERE id=$1`,
 		id, thumbObject, w, h)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errNoFeedItem
+	}
+	return nil
 }
 
 // Recent returns the newest items first.

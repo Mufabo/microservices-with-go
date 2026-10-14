@@ -60,7 +60,6 @@ import (
     "context"
     "io"
     "io/fs"
-    "log/slog"
     "net/http"
     "net/http/httptest"
     "sync"
@@ -95,17 +94,16 @@ func (f *fakeBlob) Put(_ context.Context, key, _ string, r io.Reader) error {
 }
 
 func TestServeImage(t *testing.T) {
-    store := &fakeBlob{data: map[string][]byte{"cat.jpg": []byte("\xff\xd8jpeg-bytes")}}
-    log := slog.New(slog.NewTextHandler(io.Discard, nil))
+    store := &fakeBlob{data: map[string][]byte{"originals/cat": []byte("\xff\xd8jpeg-bytes")}}
 
-    // A ServeMux so the {id} path variable is populated as in production.
+    // A ServeMux so the {name} path variable is populated as in production.
     mux := http.NewServeMux()
-    mux.HandleFunc("GET /images/{id}", serveImage(store, log))
+    mux.HandleFunc("GET /images/{name}", serveImage(store, "originals/"))
     srv := httptest.NewServer(mux)
     defer srv.Close()
 
     t.Run("found", func(t *testing.T) {
-        resp, err := http.Get(srv.URL + "/images/cat.jpg")
+        resp, err := http.Get(srv.URL + "/images/cat")
         if err != nil {
             t.Fatal(err)
         }
@@ -114,13 +112,13 @@ func TestServeImage(t *testing.T) {
             t.Fatalf("status = %d, want 200", resp.StatusCode)
         }
         body, _ := io.ReadAll(resp.Body)
-        if !bytes.Equal(body, store.data["cat.jpg"]) {
+        if !bytes.Equal(body, store.data["originals/cat"]) {
             t.Error("served bytes do not match stored bytes")
         }
     })
 
     t.Run("not found", func(t *testing.T) {
-        resp, err := http.Get(srv.URL + "/images/missing.jpg")
+        resp, err := http.Get(srv.URL + "/images/missing")
         if err != nil {
             t.Fatal(err)
         }
@@ -187,8 +185,8 @@ func TestFeedStore_Integration(t *testing.T) {
     }
 
     item := FeedItem{
-        ID: "img-1", Owner: "ada", Title: "first",
-        CreatedAt: time.Now().UTC().Truncate(time.Millisecond),
+        ID: "img-1", Owner: "ada",
+        UploadedAt: time.Now().UTC().Truncate(time.Millisecond),
     }
     if err := store.Add(ctx, item); err != nil {
         t.Fatalf("add: %v", err)
@@ -209,10 +207,32 @@ func TestFeedStore_Integration(t *testing.T) {
     if got[0].ID != item.ID || got[0].Owner != item.Owner {
         t.Errorf("got %+v, want id=%q owner=%q", got[0], item.ID, item.Owner)
     }
+
+    // Idempotent with respect to the *other* writer too: a redelivered upload
+    // event must not erase a thumbnail that has already been attached.
+    if err := store.SetThumb(ctx, item.ID, "thumbs/img-1.jpg", 320, 200); err != nil {
+        t.Fatalf("set thumb: %v", err)
+    }
+    if err := store.Add(ctx, item); err != nil {
+        t.Fatalf("re-add after thumbnail: %v", err)
+    }
+    got, err = store.Recent(ctx, 10)
+    if err != nil {
+        t.Fatalf("recent: %v", err)
+    }
+    if got[0].ThumbObject != "thumbs/img-1.jpg" {
+        t.Errorf("re-adding the upload erased the thumbnail: %+v", got[0])
+    }
+
+    // A thumbnail for a row that doesn't exist yet must be reported, not
+    // silently dropped, so the consumer can retry it.
+    if err := store.SetThumb(ctx, "not-yet", "thumbs/x.jpg", 1, 1); !errors.Is(err, errNoFeedItem) {
+        t.Errorf("SetThumb on missing row: err = %v, want errNoFeedItem", err)
+    }
 }
 ```
 
-This test starts a real PostgreSQL 16, runs the real schema migration, exercises the real `INSERT ... ON CONFLICT`, and asserts the idempotency property our consumers depend on --- the thing a mock could never verify. The `wait` strategy is important: containers report "started" before the database inside is accepting connections, so we wait for the log line that means *truly* ready (twice, because Postgres logs it once during its init phase and again when it's actually up). `t.Cleanup` tears the container down whether the test passes or fails.
+Add `"errors"` to the imports. This test starts a real PostgreSQL 16, runs the real schema migration, exercises the real `INSERT ... ON CONFLICT` and `UPDATE`, and asserts the properties our consumers depend on --- the things a mock could never verify. The thumbnail check is the one that earns its keep: an `ON CONFLICT DO UPDATE` that overwrote the thumbnail columns would pass the duplicate check and still lose data. The `wait` strategy is important: containers report "started" before the database inside is accepting connections, so we wait for the log line that means *truly* ready (twice, because Postgres logs it once during its init phase and again when it's actually up). `t.Cleanup` tears the container down whether the test passes or fails.
 
 Testing the messaging layer is just as direct, and arguably more valuable, because the message flow *is* the architecture. Here's a round-trip against a real NATS with JetStream, in `internal/platform/messaging/natsutil/natsutil_integration_test.go`:
 
@@ -262,7 +282,10 @@ func TestJetStreamRoundTrip(t *testing.T) {
         t.Fatalf("publish: %v", err)
     }
 
-    stream, _ := js.Stream(ctx, events.StreamName)
+    stream, err := js.Stream(ctx, events.StreamName)
+    if err != nil {
+        t.Fatalf("open stream: %v", err)
+    }
     cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
         Durable:       "test",
         FilterSubject: events.SubjectUploaded,
@@ -290,7 +313,7 @@ func TestJetStreamRoundTrip(t *testing.T) {
 Notice this test uses `Fetch` --- the *pull* style of consuming, where you ask for a batch of messages and get them --- rather than the *push* style (`Consume` with a callback) the services use. Pull consumers are ideal in tests because they're synchronous: you ask for one message and block until it arrives or the wait elapses, with no goroutines or channels to coordinate. Both styles consume from the same durable consumer concept; pull just hands control of the timing to the caller, which is what a test wants.
 
 ::: note
-**Testcontainers needs a Docker daemon.** These tests require Docker to be running wherever they execute --- your laptop, and the CI runner. On a self-hosted Forgejo Runner with the host's Docker socket available, they work out of the box (Chapter 8 sets this up); Codeberg's *hosted* runners deliberately don't offer Docker-in-Docker, so the integration job runs on a runner you control. The first run pulls the `postgres` and `nats` images, which is slow; subsequent runs reuse the cached images and are fast. If a developer doesn't have Docker, the build tag means `go test ./...` still runs all the unit tests cleanly --- the integration tests are simply skipped.
+**Testcontainers needs a Docker daemon.** These tests require Docker to be running wherever they execute --- your laptop, and the CI runner. On a self-hosted Forgejo Runner with the host's Docker socket available, they work out of the box (Chapter 8 shows the job); Codeberg's *hosted* runners deliberately don't offer Docker-in-Docker, so the integration tests need a runner you control. The first run pulls the `postgres` and `nats` images, which is slow; subsequent runs reuse the cached images and are fast. If a developer doesn't have Docker, the build tag means `go test ./...` still runs all the unit tests cleanly --- the integration tests are simply skipped.
 :::
 
 ## Separating fast tests from slow ones
@@ -300,10 +323,10 @@ The `//go:build integration` tag at the top of those files is the mechanism that
 ``` bash
 $ go test ./...                    # unit tests only — fast, no Docker
 $ go test -tags=integration ./...  # also runs container-backed tests
-$ go test -race -tags=integration ./...   # the full CI invocation
+$ go test -race -tags=integration ./...   # everything, with the race detector
 ```
 
-The first command is what you run constantly while coding: it finishes in a second or two and needs nothing but Go. The second is what CI runs on every push, accepting the extra time in exchange for testing the real database and broker behavior. This separation is worth setting up early; a test suite that takes a minute to run is a test suite developers stop running.
+The first command is what you run constantly while coding: it finishes in a second or two and needs nothing but Go. The second runs before you push a change to a store or a consumer, and in CI wherever a Docker daemon is available, accepting the extra time in exchange for testing the real database and broker behavior. This separation is worth setting up early; a test suite that takes a minute to run is a test suite developers stop running.
 
 ## End-to-end: the whole system
 
@@ -358,14 +381,14 @@ func TestUploadAppearsInFeed(t *testing.T) {
         r, err := http.Get(base + "/api/feed")
         if err == nil {
             var items []struct {
-                ID       string `json:"id"`
-                ThumbURL string `json:"thumb_url"`
+                ID          string `json:"id"`
+                ThumbObject string `json:"thumb_object"`
             }
             b, _ := io.ReadAll(r.Body)
             r.Body.Close()
             json.Unmarshal(b, &items)
             for _, it := range items {
-                if it.ID == up.ID && it.ThumbURL != "" {
+                if it.ID == up.ID && it.ThumbObject != "" {
                     return // success: uploaded, thumbnailed, and in the feed
                 }
             }
@@ -395,7 +418,7 @@ This single test touches every component --- gateway routing, image storage, the
 -   Microservices shift weight toward integration tests, because a service's behavior is largely its interaction with a database or broker --- things a mock cannot verify.
 -   Go's table-driven tests and `net/http/httptest` make unit-testing pure functions and handlers trivial; handlers that close over narrow interfaces (`storage.Blob`) accept in-memory fakes directly.
 -   **Testcontainers** starts a real Postgres, Mongo, or NATS in Docker inside the test and tears it down after --- so integration tests run anywhere Docker runs, with no shared test database.
--   A `//go:build integration` tag keeps container-backed tests out of the fast inner loop; `go test ./...` stays quick, `go test -tags=integration ./...` runs the full suite in CI.
+-   A `//go:build integration` tag keeps container-backed tests out of the fast inner loop; `go test ./...` stays quick, `go test -tags=integration ./...` runs the full suite wherever Docker is available.
 -   End-to-end tests must **poll**, because the system is eventually consistent; keep them few, specific, and generously timed.
 -   Always run `-race` in CI.
 

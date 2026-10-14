@@ -4,7 +4,7 @@ Snapvault now runs on a self-healing cluster, provisioned from code. But ask a s
 
 Observability is the property of being able to answer questions like that about a running system without shipping new code to investigate. It rests on three kinds of telemetry, often called the three pillars: **logs** (discrete events --- "this happened"), **metrics** (aggregate numbers over time --- "how many, how fast"), and **traces** (the path of a single request as it moves through services --- "where did the time go, and where did it break"). This chapter gives Snapvault all three and pipes them into Google Cloud's Logging, Monitoring, and Trace, so the upload question becomes a thirty-second investigation instead of an afternoon.
 
-![The three pillars feeding Google Cloud: structured logs to Cloud Logging, RED metrics scraped by Managed Prometheus into Cloud Monitoring, and OpenTelemetry spans exported to Cloud Trace --- correlated by a trace ID that travels across HTTP and NATS.](images/ch11_observability.png)
+![The three pillars feeding Google Cloud: structured logs to Cloud Logging, RED metrics scraped by Managed Prometheus into Cloud Monitoring, and OpenTelemetry spans exported to Cloud Trace --- correlated by a trace ID that travels across HTTP and NATS.](images/ch13_observability.png)
 
 ## Logs: structured already, correlated next
 
@@ -106,7 +106,18 @@ func (s *statusRecorder) WriteHeader(c int) {
 }
 ```
 
-`routeOf` returns the matched pattern (`/images/{id}`, not `/images/abc123`) so that high-cardinality IDs don't explode into thousands of distinct metric series --- a classic and expensive mistake. Each HTTP service wraps its mux with `metrics.Middleware` and serves `metrics.Handler()` at `/metrics`. The error rate and request rate are both derivable from the histogram's count, and latency percentiles from its buckets --- three signals from one instrument.
+`routeOf` returns the matched pattern (`/images/{name}`, not `/images/abc123`) so that high-cardinality IDs don't explode into thousands of distinct metric series --- a classic and expensive mistake. Since Go 1.23, `ServeMux` records the pattern it matched in `r.Pattern`, so the helper is three lines:
+
+``` go
+func routeOf(r *http.Request) string {
+    if r.Pattern != "" {
+        return r.Pattern
+    }
+    return "unmatched" // a 404: never label by the raw path
+}
+```
+
+It works only because the middleware wraps the mux directly and reads `r.Pattern` *after* the mux has served the request. Each HTTP service wraps its mux with `metrics.Middleware` and serves `metrics.Handler()` at `/metrics`. The error rate and request rate are both derivable from the histogram's count, and latency percentiles from its buckets --- three signals from one instrument.
 
 The thumbnails worker has no requests to count, but it has the metric that matters most for a queue-based system: how much work is waiting. Expose the consumer's pending count and the time each resize takes:
 
@@ -123,7 +134,7 @@ var (
 )
 ```
 
-The worker increments `thumbsProcessed` on each success and observes `thumbDuration` around the resize. The **queue depth** --- JetStream's count of unacknowledged messages for the `thumbnailer` consumer --- is the signal we'll scale on in Chapter 14: a deep, growing backlog means one worker can't keep up, and Snapvault should run more. JetStream exposes that depth through its consumer info, which a small periodic gauge can publish.
+The worker increments `thumbsProcessed` on each success and observes `thumbDuration` around the resize. The other number that matters for a queue-based system is **queue depth** --- JetStream's count of messages waiting for the `thumbnailer` consumer. A deep, growing backlog means the workers can't keep up. You can read it any time with `nats consumer info IMAGES thumbnailer` (the "Unprocessed Messages" line). To graph and alert on it, run the official **prometheus-nats-exporter** next to the NATS server: it scrapes the server's monitoring endpoint and exposes per-consumer pending counts as Prometheus metrics, which Managed Prometheus collects like any other. Chapter 14 discusses scaling on it.
 
 On GKE, **Google Managed Service for Prometheus** scrapes these `/metrics` endpoints for you --- no Prometheus server to run. You point it at your Pods with a `PodMonitoring` resource:
 
@@ -161,9 +172,17 @@ import (
     sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// Init wires a Cloud Trace exporter and the W3C propagator. The returned
-// func flushes spans on shutdown.
+// Init installs the W3C propagator and, when projectID is set, a Cloud Trace
+// exporter. With no project (local development) it leaves the global no-op
+// tracer in place, so the same binary runs without Google Cloud credentials.
+// The returned func flushes spans on shutdown.
 func Init(ctx context.Context, projectID string) (func(context.Context) error, error) {
+    otel.SetTextMapPropagator(propagation.TraceContext{})
+
+    if projectID == "" {
+        return func(context.Context) error { return nil }, nil
+    }
+
     exp, err := texporter.New(texporter.WithProjectID(projectID))
     if err != nil {
         return nil, err
@@ -173,10 +192,11 @@ func Init(ctx context.Context, projectID string) (func(context.Context) error, e
         sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))),
     )
     otel.SetTracerProvider(tp)
-    otel.SetTextMapPropagator(propagation.TraceContext{})
     return tp.Shutdown, nil
 }
 ```
+
+Each service calls it first thing in `main`, with `telemetry.Init(ctx, config.String("GOOGLE_CLOUD_PROJECT", ""))`, and exits if it returns an error. The empty-project branch matters more than it looks. Without it, `texporter.New` would try to discover a project from the environment, fail on a laptop with no Google Cloud credentials, and take every service in your Compose stack down at startup. In the cluster, set `GOOGLE_CLOUD_PROJECT` and the exporter switches on; the runtime service account needs `roles/cloudtrace.agent` to write spans.
 
 The sampler keeps 10% of traces (`TraceIDRatioBased(0.1)`) but, because it's `ParentBased`, always keeps a trace whole --- if the gateway decided to sample a request, every downstream span for it is kept too. Setting the `TraceContext` propagator tells OpenTelemetry to read and write the W3C `traceparent` header.
 
@@ -246,7 +266,7 @@ Return to the opening question: an upload from thirty seconds ago isn't in the f
 -   **Observability** is answering questions about a running system without shipping new code to investigate, built on three pillars: **logs**, **metrics**, and **traces**.
 -   Structured `slog` JSON to stdout (from Chapter 2) is **auto-ingested by Cloud Logging** on GKE; a **correlation ID** middleware stitches one request's log lines across synchronous hops.
 -   **RED metrics** (rate, errors, duration) for HTTP services come from a single latency histogram labelled by *matched route* --- never raw IDs, which explode cardinality.
--   The worker's key metric is **queue depth** (JetStream's unacknowledged count); it's the signal we'll autoscale on in Chapter 14.
+-   The worker's key metric is **queue depth** (JetStream's pending count), visible with `nats consumer info` and exportable to Prometheus with the NATS exporter.
 -   **Google Managed Service for Prometheus** scrapes `/metrics` via a `PodMonitoring` resource --- no Prometheus server to operate.
 -   **OpenTelemetry** traces follow one request as a tree of spans sharing a **trace ID**; `otelhttp` propagates context over HTTP almost for free.
 -   The asynchronous hop is preserved by **injecting trace context into NATS message headers** on publish and **extracting** it on consume --- the detail that makes distributed tracing actually work across a broker.
