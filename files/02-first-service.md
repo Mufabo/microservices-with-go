@@ -2,19 +2,19 @@
 
 A microservices system is just a collection of small programs that each do one job well. So the right place to start is with one such program, built carefully, because the structure you establish now is the structure you'll copy four more times before the book is done. We'll create the Snapvault repository, write the **images** service as a minimal HTTP server, and give it the production habits --- configuration from the environment, structured logging, graceful shutdown, health endpoints --- that every service in this book will share.
 
-## Setting up Go 1.26
+## Setting up Go 1.27
 
-Install Go 1.26 from the official downloads if you don't already have it, then confirm:
+Install Go 1.27 from the official downloads if you don't already have it, then confirm:
 
 ``` bash
 $ go version
-go version go1.26.0 linux/amd64
+go version go1.27.0 linux/amd64
 ```
 
-Any 1.26.x patch release is fine. If you're on an older Go, upgrade --- the `go 1.26.0` line in our module requires it, so an older toolchain will either download 1.26 for you or refuse to build.
+Any 1.27.x patch release is fine. If you're on an older Go, upgrade --- the `go 1.27.0` line in our module requires it, so an older toolchain will either download 1.27 for you or refuse to build.
 
 ::: tip
-**Let the toolchain manage itself.** Since Go 1.21, a `go` line like `go 1.26.0` in `go.mod` is not just documentation --- if your installed Go is newer, it's used; if a matching toolchain isn't present, the `go` command can download the right one automatically. You rarely need to install Go versions by hand anymore.
+**Let the toolchain manage itself.** Since Go 1.21, a `go` line like `go 1.27.0` in `go.mod` is not just documentation --- if your installed Go is newer, it's used; if a matching toolchain isn't present, the `go` command can download the right one automatically. You rarely need to install Go versions by hand anymore.
 :::
 
 ## Creating the repository
@@ -31,7 +31,7 @@ That last command writes a `go.mod`. Open it and set the toolchain line explicit
 
     module codeberg.org/example/snapvault
 
-    go 1.26.0
+    go 1.27.0
 
 Now lay out the directories. The layout below is the one we'll grow into:
 

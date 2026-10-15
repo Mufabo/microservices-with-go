@@ -20,7 +20,7 @@ rights: >-
   personal and educational use.
 description: >-
   A hands-on guide to building a complete microservices system from scratch
-  using Go 1.26, NATS for messaging, and Google Cloud for deployment. Covers
+  using Go 1.27, NATS for messaging, and Google Cloud for deployment. Covers
   HTTP services, Docker, Docker Compose, MongoDB and PostgreSQL, asynchronous
   messaging with NATS JetStream, testing, CI/CD, Kubernetes on GKE, packaging
   with Helm, infrastructure as code with Terraform, observability, and production

@@ -4,7 +4,7 @@
 # SERVICE build argument, e.g.:
 #   docker build --build-arg SERVICE=images -t snapvault/images .
 #
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.27
 
 # ---- build stage: compile a static binary ----
 FROM golang:${GO_VERSION} AS build

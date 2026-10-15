@@ -1,9 +1,11 @@
 module codeberg.org/example/snapvault
 
-go 1.26.0
+go 1.27.0
 
-// The first block lists the direct dependencies. After changing imports, run
-// `go mod tidy` and commit go.mod and go.sum together.
+// The first block lists the direct dependencies. The testcontainers modules
+// are test-only: integration tests use them to start Postgres and NATS in
+// Docker. After changing imports, run `go mod tidy` and commit go.mod and
+// go.sum together.
 
 require (
 	cloud.google.com/go/storage v1.69.0
@@ -13,6 +15,9 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/nats-io/nats.go v1.54.0
 	github.com/prometheus/client_golang v1.25.0
+	github.com/testcontainers/testcontainers-go v0.34.0
+	github.com/testcontainers/testcontainers-go/modules/nats v0.34.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.34.0
 	go.mongodb.org/mongo-driver/v2 v2.9.2
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
@@ -114,11 +119,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-)
-
-// Test-only dependencies (Testcontainers spins up real Postgres/NATS in Docker).
-require (
-	github.com/testcontainers/testcontainers-go v0.34.0
-	github.com/testcontainers/testcontainers-go/modules/nats v0.34.0
-	github.com/testcontainers/testcontainers-go/modules/postgres v0.34.0
 )

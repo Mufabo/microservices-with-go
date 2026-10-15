@@ -20,7 +20,7 @@ Create a `Dockerfile` at the repository root --- not inside `services/images/`, 
 # syntax=docker/dockerfile:1
 
 # ---- build stage: compile a static binary ----
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 WORKDIR /src
 
 # Download dependencies first, in their own layer, so this step is cached

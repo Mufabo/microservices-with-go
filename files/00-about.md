@@ -24,7 +24,7 @@ Snapvault ends up as five small services --- a public **gateway**, an **images**
   --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   Concern                 Tool                        Why it earns its place
   ----------------------- --------------------------- ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-  Language                **Go 1.26**                 Small static binaries, fast startup, first-class concurrency, and a standard library that already covers HTTP, JSON, and TLS --- ideal for services that must boot quickly and scale horizontally.
+  Language                **Go 1.27**                 Small static binaries, fast startup, first-class concurrency, and a standard library that already covers HTTP, JSON, and TLS --- ideal for services that must boot quickly and scale horizontally.
 
   Messaging               **NATS** (with JetStream)   A single small binary that gives you both fire-and-forget pub/sub and durable, replayable streams, with an operational footprint a fraction of heavier brokers.
 
@@ -82,6 +82,6 @@ Three kinds of asides appear throughout:
 **Warning** --- a mistake that will cost you time, or a footgun to avoid in production.
 :::
 
-A note on versions: Go 1.26 was released in February 2026, and the code targets it directly. The cloud and library commands reflect their state at the time of writing; vendors change console layouts and flag names more often than anyone would like, so treat exact UI steps as a guide and the underlying concepts as the durable part.
+A note on versions: Go 1.27 was released in August 2026, and the code targets it directly. The cloud and library commands reflect their state at the time of writing; vendors change console layouts and flag names more often than anyone would like, so treat exact UI steps as a guide and the underlying concepts as the durable part.
 
 Let's build something.

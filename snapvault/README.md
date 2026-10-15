@@ -54,7 +54,7 @@ asynchronously through NATS.
 
 | Concern         | Choice                                   |
 | --------------- | ---------------------------------------- |
-| Language        | Go 1.26                                  |
+| Language        | Go 1.27                                  |
 | Messaging       | NATS JetStream                           |
 | Object storage  | Local disk (dev) / Google Cloud Storage  |
 | Feed database   | PostgreSQL (Cloud SQL) via pgx v5        |
@@ -93,7 +93,7 @@ compose.yaml                 local development stack
 
 ## Prerequisites
 
-- Go 1.26+
+- Go 1.27+
 - Docker (with Compose) for the local stack and integration tests
 - For deployment: a Google Cloud project, `gcloud`, `kubectl`, and Terraform
 

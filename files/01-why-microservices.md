@@ -63,16 +63,16 @@ You could build microservices in almost any language. Several properties make Go
 
 **A standard library that already speaks cloud.** Out of the box, with nothing imported, Go gives you a production-grade HTTP server and client, JSON encoding, TLS, and --- since recent versions --- structured logging via `log/slog`. You will lean on a few external libraries (a NATS client, database drivers, the Google Cloud SDK), but the core of every Snapvault service is standard-library Go.
 
-### What Go 1.26 brings to the table
+### What Go 1.27 brings to the table
 
-We target Go 1.26 (released February 2026). Snapvault's code doesn't depend on any 1.26-only feature, but a few of its changes are worth knowing about for services like ours:
+We target Go 1.27 (released August 2026). Snapvault's code doesn't depend on any 1.27-only feature, but a few recent changes are worth knowing about for services like ours:
 
--   **The Green Tea garbage collector is on by default,** reducing GC overhead for the kind of allocation-heavy, many-small-objects workload a JSON-slinging service produces. This is the one you get without doing anything: every Snapvault service benefits simply by building with 1.26.
--   **The `new` builtin now takes an expression.** Previously `new` could only allocate a zero value of a type; now `new(expr)` allocates a variable initialized to `expr` and returns a pointer to it. That retires the little `func ptr[T any](v T) *T` helper that many Go codebases grew to populate optional pointer fields.
--   **`log/slog` gained the ability to fan out to multiple handlers,** which is handy when you want logs going to both your terminal (human-readable) and a structured sink (machine-readable) during development.
--   **An experimental goroutine-leak profile** (`GOEXPERIMENT=goroutineleakprofile`) can flag goroutines blocked forever on a channel or lock --- a category of bug that distributed Go systems produce with depressing regularity.
+-   **`encoding/json` now runs on a new, faster implementation.** The package keeps its API and behavior (only the exact text of some error messages differs), but unmarshaling is significantly faster. Every Snapvault service decodes JSON, so every one benefits simply by building with 1.27. The new implementation is also published as `encoding/json/v2`, with stricter defaults --- it rejects invalid UTF-8 and duplicate object keys --- for code that wants them.
+-   **The Green Tea garbage collector,** on by default since Go 1.26, reduces GC overhead for the allocation-heavy, many-small-objects workload a JSON-slinging service produces. Go 1.27 adds size-specialized allocation routines that make small allocations cheaper still.
+-   **The goroutine-leak profile is now generally available.** It flags goroutines blocked forever on a channel or lock --- a category of bug that distributed Go systems produce with depressing regularity --- and it's served at `/debug/pprof/goroutineleak` by `net/http/pprof`.
+-   **Methods can now declare their own type parameters.** Generic helpers can live on the type they belong to instead of floating at package level.
 
-None of these are load-bearing for the architecture; they're quality-of-life improvements. The patterns in this book work on Go 1.22+ (the first release with method-and-path routing in `http.ServeMux`); we target 1.26 to stay current.
+None of these are load-bearing for the architecture; they're quality-of-life improvements. The patterns in this book work on Go 1.22+ (the first release with method-and-path routing in `http.ServeMux`); we target 1.27 to stay current.
 
 ## The shape of the journey
 
@@ -85,5 +85,5 @@ The next chapter starts where every system does: with one service, a single HTTP
 -   A microservice is a small, independently deployable program that owns one capability and its data, and talks to the rest of the system only over the network.
 -   The architecture buys you independent deployment, independent scaling, and fault isolation --- and charges you network unreliability, the loss of distributed transactions, and significant operational complexity.
 -   Most systems should begin as a modular monolith and split out services only in response to concrete pain, not speculatively.
--   Go suits microservices through tiny static binaries, fast startup, lightweight concurrency, and a cloud-ready standard library; Go 1.26 sharpens several of these edges.
+-   Go suits microservices through tiny static binaries, fast startup, lightweight concurrency, and a cloud-ready standard library; Go 1.27 sharpens several of these edges.
 -   We build Snapvault as microservices to *learn* the techniques on a system small enough to grasp completely.

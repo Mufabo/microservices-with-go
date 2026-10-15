@@ -31,7 +31,7 @@ jobs:
 
       - uses: https://code.forgejo.org/actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache: true
 
       - name: Vet
@@ -58,7 +58,7 @@ Once you have such a runner, add the integration tests as a job of their own, an
       - uses: https://code.forgejo.org/actions/checkout@v4
       - uses: https://code.forgejo.org/actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Integration tests (real Postgres and NATS via Testcontainers)
         run: go test -race -tags=integration ./...
 ```
