@@ -20,13 +20,20 @@ go test -tags=integration -run TestEnsureStream_RoundTrip ./internal/platform/me
 docker compose up --build                     # full local stack; gateway on localhost:8080
 docker build --build-arg SERVICE=images -t snapvault/images .   # SERVICE: gateway|images|thumbnails|metadata|feed
 deploy/k8s/check-images.sh                    # renders the prod overlay; fails on an unmapped placeholder image
+GOTOOLCHAIN=go1.27.2 go run golang.org/x/vuln/cmd/govulncheck@latest ./...   # vuln scan; set GOTOOLCHAIN to the newest patch release
+curl -F "image=@photo.png" localhost:8080/api/images   # smoke test against compose; the form field is `image`
 ```
+
+govulncheck checks the standard library of the toolchain it runs under, so with an old local Go it reports stdlib issues that CI and image builds don't have.
 
 Book (run from `files/`; needs Python 3 and the Pandoc version pinned at the top of `build.sh`):
 
 ```sh
 ./build.sh   # writes files/Microservices-in-Go.epub and regenerates files/book-src.zip
+mv Microservices-in-Go.epub ..   # the tracked EPUB is the one at the repo root
 ```
+
+The copy `build.sh` leaves in `files/` is not gitignored, so move it to the root (as `epub.yaml` does) rather than committing it.
 
 ## Snapvault architecture
 
@@ -63,6 +70,8 @@ Delivery is at-least-once, so every handler must be idempotent (feed uses `ON CO
 
 ## Deployment
 
+- The Go version (1.27) appears in `go.mod`, the Dockerfile's `GO_VERSION`, both CI workflows, and the book (chapters 0, 1, 2, 3 and 8), `files/metadata.yaml`, and `snapvault/README.md`. Chapter 1 has a "What Go 1.27 brings" section written from the release notes. A version bump touches all of them.
+- `compose.yaml` publishes Postgres, MongoDB, and NATS on host ports 5432, 27017, and 4222, besides the gateway on 8080. A database already listening on one of those ports (including one in another WSL distro, since WSL2 distros share a network) stops that container from starting.
 - One parameterized `Dockerfile` builds every service (distroless, `SERVICE` build arg). It ships an empty `/data` owned by UID 65532, so the Compose named volume mounted there is writable by the nonroot user. A volume created by an older image stays root-owned until you run `docker compose down -v`.
 - `deploy/k8s/base` plus `deploy/k8s/overlays/prod` are Kustomize. The overlay's ConfigMap patch also sets `AUTH_ISSUER` and `AUTH_AUDIENCE` (the `auth_issuer`/`auth_audience` Terraform outputs); the base sets neither, so an unconfigured gateway won't start. Base manifests use placeholder images (`snapvault/<svc>:latest`), which the overlay's `images:` list maps to Artifact Registry. A mismatched name is silently left unmapped, which breaks both the overlay and CI's `kustomize edit set image snapvault/<svc>=...`. `deploy/k8s/check-images.sh` catches this and runs in CI. The overlay has `REGION`/`PROJECT_ID` placeholders that must be filled in.
 - The feed Pod reaches Cloud SQL through a Cloud SQL Auth Proxy native sidecar (an init container with `restartPolicy: Always`), so its `DATABASE_URL` points at `127.0.0.1:5432`. The overlay patches in the instance connection name, which is the `cloudsql_connection_name` Terraform output.
