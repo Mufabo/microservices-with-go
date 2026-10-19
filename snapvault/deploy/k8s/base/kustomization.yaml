@@ -11,3 +11,4 @@ resources:
   - thumbnails.yaml
   - metadata.yaml
   - feed.yaml
+  - networkpolicy.yaml

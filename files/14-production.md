@@ -464,7 +464,35 @@ A misconfigured deployment can't quietly become an open one. The prod overlay se
 
 ### The trust boundary
 
-Trusting a header is only safe if nobody but the gateway can send requests to the images service. The gateway is the only public entry point, and images is a `ClusterIP` Service, unreachable from outside the cluster. Inside the cluster, though, any Pod could call it directly. For defense in depth, add a Kubernetes **NetworkPolicy** that admits traffic to the images Pods only from the gateway, plus the kubelet's health probes and the Managed Prometheus collectors that scrape `/metrics`. That way a compromised Pod elsewhere in the namespace can't upload as anyone it likes.
+Trusting a header is only safe if nobody but the gateway can send requests to the images service. The gateway is the only public entry point, and images is a `ClusterIP` Service, unreachable from outside the cluster. Inside the cluster, though, any Pod could call it directly and claim to be any user. A Kubernetes **NetworkPolicy** closes that gap. Once a policy selects a Pod, the Pod accepts only the traffic the policy lists, and everything else is dropped. Add `base/networkpolicy.yaml` to the config repo, and list it in `base/kustomization.yaml`:
+
+``` yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: images-ingress
+spec:
+  podSelector:
+    matchLabels: { app: images }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: gateway }
+      ports:
+        - port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: gmp-system }
+      ports:
+        - port: 8080
+```
+
+-   **The first rule admits the gateway.** A bare `podSelector` in `from` means Pods with that label in the policy's own namespace, so a Pod labelled `app: gateway` in some other namespace doesn't count.
+-   **The second rule admits Managed Prometheus.** Its collectors run in the `gmp-system` namespace and scrape `/metrics` on the same port (Chapter 13). Leave them out and nothing fails loudly: the images service just stops reporting metrics. A NetworkPolicy works on addresses and ports, not URL paths, so it can't limit the collectors to `/metrics`.
+-   **Health probes need no rule.** The kubelet probes from the node itself, and GKE allows node traffic to the node's own Pods, so readiness and liveness keep working.
+
+GKE Autopilot clusters run GKE Dataplane V2, which enforces NetworkPolicy out of the box. On a cluster without an enforcing network plugin, the API server accepts the policy and nothing enforces it, so test it once. From a throwaway Pod with no `app: gateway` label, a request to `images:8080` should now time out, while the gateway keeps working.
 
 The verification code is tested like any other code, without Google. `services/gateway/auth_test.go` starts a fake OIDC issuer --- a discovery document and a key set on an `httptest` server --- and signs tokens with its own key. It checks that a valid token is accepted, and that a wrong audience, wrong issuer, expired token, foreign signing key, or missing subject are all rejected. A forged `X-Snapvault-User` never reaches upstream. These are exactly the properties an attacker would probe, so they're worth pinning down in tests.
 
@@ -485,7 +513,7 @@ But the most important lesson is the one from Chapter 1, and it's worth repeatin
 -   The **gateway aggregation** fans out to feed and metadata concurrently with independent timeouts, returns as slow as the slower call rather than their sum, and degrades when the optional dependency is down.
 -   Run **NATS as a 3-node cluster with replicated JetStream streams** (`Replicas: 3`) so neither the broker nor its messages depend on a single Pod.
 -   A **PodDisruptionBudget** preserves availability during voluntary disruptions; set **resource requests from observed metrics**, which is most of cost control on Autopilot.
--   **Identity Platform** signs users in and issues OIDC ID tokens. The gateway verifies them (`go-oidc`: signature, issuer, audience, expiry), derives `owner` from the token, and passes it inward in a header it strips from every client request. The gateway fails closed: no auth configuration, no start.
+-   **Identity Platform** signs users in and issues OIDC ID tokens. The gateway verifies them (`go-oidc`: signature, issuer, audience, expiry), derives `owner` from the token, and passes it inward in a header it strips from every client request. The gateway fails closed: no auth configuration, no start. A **NetworkPolicy** lets only the gateway (and the metrics collectors) reach images, so no other Pod can forge that header.
 -   The deepest lesson is Chapter 1's: this architecture is a cost as much as a capability --- adopt it when the workloads genuinely demand it, and build the monolith when they don't.
 
 There is no next chapter to bridge to --- Snapvault is built, deployed, observable, scalable, and resilient. What remains is reference material: the appendix collects the commands used throughout the book in one place, so the tools are at your fingertips as you build systems of your own.

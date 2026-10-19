@@ -1,0 +1,31 @@
+# The images service trusts the X-Snapvault-User header, which only the
+# gateway may set (it strips any client-supplied copy). This policy makes that
+# true at the network level: inside the cluster, only gateway Pods can reach
+# images. Everything else is dropped, so a compromised Pod can't upload as
+# whoever it likes.
+#
+# Also admitted:
+#   - Managed Service for Prometheus, whose collectors in the gmp-system
+#     namespace scrape /metrics on the same port. NetworkPolicy works at L4,
+#     so it can't limit them to that path.
+#   - kubelet health probes. They come from the node, which GKE Dataplane V2
+#     (always on in Autopilot) allows without a rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: images-ingress
+spec:
+  podSelector:
+    matchLabels: { app: images }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: gateway }
+      ports:
+        - port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: gmp-system }
+      ports:
+        - port: 8080

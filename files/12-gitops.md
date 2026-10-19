@@ -29,6 +29,7 @@ Create a second Codeberg repository, `snapvault-config`, structured with Kustomi
         thumbnails.yaml
         metadata.yaml
         feed.yaml
+        networkpolicy.yaml  # who may call images, from Chapter 14
         kustomization.yaml
       overlays/
         prod/

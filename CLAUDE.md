@@ -62,7 +62,7 @@ Delivery is at-least-once, so every handler must be idempotent (feed uses `ON CO
   - `AUTH_DEV_USER` alone is local dev mode (Compose sets it); every upload belongs to that user.
   - With neither set, the gateway refuses to start.
 - Tests in `auth_test.go` run against a fake issuer with self-signed tokens, with no Google dependency.
-- Internal services trust the header because images is ClusterIP-only. There is no NetworkPolicy yet restricting images ingress to the gateway; the book recommends one.
+- Internal services can trust the header because `deploy/k8s/base/networkpolicy.yaml` admits only gateway Pods (plus Managed Prometheus from `gmp-system`) to images. A new service that has to call images needs a rule there; a new service that serves a user-attributed write needs its own policy.
 
 **Thumbnails** (`services/thumbnails`) has no business HTTP surface. Its only HTTP listener is health and metrics on `HEALTH_PORT` (8081). Readiness requires both an attached consumer and a live NATS connection.
 
