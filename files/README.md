@@ -8,6 +8,7 @@ These are the individual source files that build the EPUB
 ```
 metadata.yaml            # EPUB metadata (title, author, rights, description)
 epub.css                 # stylesheet, including the note/tip/warning asides
+code-dark.theme          # syntax-highlighting colors for the dark code blocks
 build.sh                 # builds the EPUB and book-src.zip (pins the Pandoc version)
 book-src.zip             # generated: these sources as one download
 00-about.md              # front matter

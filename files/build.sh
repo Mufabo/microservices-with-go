@@ -44,7 +44,7 @@ pandoc \
   --css epub.css \
   --epub-cover-image images/cover.png \
   --resource-path=.:images \
-  --syntax-highlighting=tango \
+  --syntax-highlighting=code-dark.theme \
   -o "Microservices-in-Go.epub"
 
 echo "Wrote Microservices-in-Go.epub"

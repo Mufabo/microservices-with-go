@@ -72,19 +72,16 @@ pre code {
   font-size: 1em;
   border-radius: 0;
 }
+/* Pandoc renders each code line as an inline-block span that starts with an
+   empty line-anchor <a>. Its own `span:empty` rule therefore never matches a
+   blank line, which collapses to zero height. Give every line a height. */
+pre > code.sourceCode > span { min-height: 1.25em; }
 
-/* syntax highlighting (pandoc skylighting tokens), tuned for dark bg */
-pre .kw { color: #ff7b72; }   /* keyword */
-pre .dt { color: #79c0ff; }   /* datatype */
-pre .st { color: #a5d6ff; }   /* string */
-pre .co { color: #8b949e; font-style: italic; } /* comment */
-pre .fu { color: #d2a8ff; }   /* function */
-pre .dv, pre .bn, pre .fl { color: #f2cc60; } /* numbers */
-pre .ot { color: #ffa657; }   /* other token */
-pre .va { color: #ffa657; }   /* variable */
-pre .cf { color: #ff7b72; }   /* control flow */
-pre .op { color: #e6edf3; }   /* operator */
-pre .at { color: #79c0ff; }   /* attribute */
+/* Syntax-highlighting colors are not set here. They live in code-dark.theme,
+   which build.sh passes to pandoc, and pandoc embeds them in every chapter
+   as `code span.xx` rules. Those rules are more specific than anything in
+   this file, so token colors defined here would never apply. The theme's
+   colors are chosen for the #0e1b2a background above: keep the two in sync. */
 
 /* ---- callouts (pandoc fenced divs) ---- */
 div.note, div.tip, div.warning, div.sidebar {
