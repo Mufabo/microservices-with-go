@@ -19,7 +19,6 @@ spec:
             - containerPort: 8081   # health only; no Service fronts this worker
           envFrom:
             - configMapRef: { name: snapvault-config }
-            - secretRef: { name: snapvault-secrets }
           readinessProbe:
             httpGet: { path: /health/ready, port: 8081 }
             initialDelaySeconds: 3

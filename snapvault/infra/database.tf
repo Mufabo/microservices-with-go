@@ -32,15 +32,33 @@ resource "google_sql_database" "feed" {
   instance = google_sql_database_instance.postgres.name
 }
 
-resource "random_password" "pg" {
-  length  = 24
-  special = false
+# The database user and its password are created out of band, so the password
+# never enters Terraform state (anyone who can read the state could read it):
+#
+#   gcloud sql users create snapvault --instance=snapvault-pg --password="$DB_PASSWORD"
+#   printf 'postgres://snapvault:%s@127.0.0.1:5432/snapvault?sslmode=disable' "$DB_PASSWORD" |
+#     gcloud secrets versions add snapvault-database-url --data-file=-
+#
+# The DSN points at the Auth Proxy sidecar on localhost; sslmode=disable only
+# covers the hop inside the Pod, and the proxy encrypts the rest.
+#
+# Earlier versions of this file generated the password here. These removed
+# blocks make Terraform forget those resources without destroying them, so an
+# existing user and secret version survive the upgrade. Their values are still
+# in old state snapshots, so rotate the password after applying.
+removed {
+  from = random_password.pg
+  lifecycle { destroy = false }
 }
 
-resource "google_sql_user" "app" {
-  name     = "snapvault"
-  instance = google_sql_database_instance.postgres.name
-  password = random_password.pg.result
+removed {
+  from = google_sql_user.app
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = google_secret_manager_secret_version.database_url
+  lifecycle { destroy = false }
 }
 
 # Let the runtime identity connect through the Cloud SQL Auth Proxy.
@@ -50,8 +68,9 @@ resource "google_project_iam_member" "runtime_cloudsql" {
   member  = "serviceAccount:${google_service_account.runtime.email}"
 }
 
-# The feed service reads DATABASE_URL from Secret Manager (mounted by the CSI
-# driver). Keeping the connection string here means it never lands in git.
+# The feed service reads DATABASE_URL from Secret Manager, mounted into its Pod
+# by GKE's Secret Manager add-on (secrets.tf). Terraform declares that the
+# secret exists; its value is added out of band (see the commands above).
 resource "google_secret_manager_secret" "database_url" {
   secret_id = "snapvault-database-url"
   replication {
@@ -59,24 +78,8 @@ resource "google_secret_manager_secret" "database_url" {
   }
 }
 
-# The DSN points at the Auth Proxy sidecar on localhost. sslmode=disable only
-# covers the hop inside the Pod; the proxy encrypts the connection to Cloud SQL.
-resource "google_secret_manager_secret_version" "database_url" {
-  secret = google_secret_manager_secret.database_url.id
-  secret_data = format(
-    "postgres://%s:%s@127.0.0.1:5432/%s?sslmode=disable",
-    google_sql_user.app.name,
-    random_password.pg.result,
-    google_sql_database.feed.name,
-  )
-}
-
 resource "google_secret_manager_secret_iam_member" "runtime_db" {
   secret_id = google_secret_manager_secret.database_url.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
-
-# NOTE: MongoDB (metadata service) is not a managed GCP product. Run it via
-# MongoDB Atlas or a self-managed StatefulSet, and store its MONGO_URI in
-# Secret Manager the same way as DATABASE_URL above.

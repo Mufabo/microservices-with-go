@@ -28,6 +28,11 @@ output "cloudsql_connection_name" {
   value       = google_sql_database_instance.postgres.connection_name
 }
 
+output "gateway_ip" {
+  description = "Public IP of the gateway's HTTPS load balancer; point your domain's A record here."
+  value       = google_compute_global_address.gateway.address
+}
+
 output "gke_cluster" {
   value = google_container_cluster.autopilot.name
 }

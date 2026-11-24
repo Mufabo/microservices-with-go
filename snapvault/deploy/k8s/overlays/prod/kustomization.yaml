@@ -7,6 +7,8 @@ resources:
   - ../../base
   - hpa.yaml
   - pdb.yaml
+  - secretproviderclass.yaml
+  - ingress.yaml
 
 # CI updates these tags in the config repo with:
 #   kustomize edit set image snapvault/<svc>=<registry>/<svc>:<sha>

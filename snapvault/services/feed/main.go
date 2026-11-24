@@ -45,7 +45,10 @@ func main() {
 	}
 	defer func() { _ = shutdown(ctx) }()
 
-	store, err := newFeedStore(ctx, config.FileOrEnv("DATABASE_URL"))
+	// MustString follows DATABASE_URL_FILE to the mounted secret in the
+	// cluster, and fails fast if neither is set: an empty DSN would otherwise
+	// fall back to libpq defaults and fail later with a confusing error.
+	store, err := newFeedStore(ctx, config.MustString("DATABASE_URL"))
 	if err != nil {
 		log.Error("postgres connect", "err", err)
 		os.Exit(1)

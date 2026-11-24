@@ -11,11 +11,8 @@ data:
   METADATA_URL: "http://metadata:8080"
   FEED_URL: "http://feed:8080"
   LOG_LEVEL: "info"
-# Secrets (MONGO_URI, DATABASE_URL, and GOOGLE_CLOUD_PROJECT if used) are NOT in
-# git. In production they come from Secret Manager via the CSI driver; the
-# Terraform in ../../infra provisions them. For a quick cluster test you can
-# create them manually, e.g.:
-#
-#   kubectl create secret generic snapvault-secrets \
-#     --from-literal=MONGO_URI='mongodb://...' \
-#     --from-literal=DATABASE_URL='postgres://...'
+# Secrets (DATABASE_URL, MONGO_URI) are NOT in git or in the cluster. feed and
+# metadata mount them from Secret Manager through GKE's Secret Manager add-on
+# (overlays/prod/secretproviderclass.yaml) and read them via DATABASE_URL_FILE
+# and MONGO_URI_FILE. ../../infra declares the secrets and grants access; their
+# values are added out of band (see infra/database.tf and infra/secrets.tf).

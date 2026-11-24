@@ -34,7 +34,14 @@ spec:
             - containerPort: 8080
           envFrom:
             - configMapRef: { name: snapvault-config }
-            - secretRef: { name: snapvault-secrets }
+          env:
+            # Read through config.MustString, which follows *_FILE.
+            - name: DATABASE_URL_FILE
+              value: /secrets/database-url
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
           readinessProbe:
             httpGet: { path: /health/ready, port: 8080 }
             initialDelaySeconds: 3
@@ -46,6 +53,15 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 128Mi }
             limits: { memory: 256Mi }
+      volumes:
+        # Secret Manager secrets, mounted by GKE's Secret Manager add-on. The
+        # SecretProviderClass naming them is per environment (overlays/prod).
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: snapvault-secrets
 ---
 apiVersion: v1
 kind: Service

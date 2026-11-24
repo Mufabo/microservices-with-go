@@ -30,6 +30,10 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      # Apply ignoreDifferences at sync time too, not only when diffing.
+      # Without it, every sync (each image promotion) re-applies the base's
+      # replicas: 2 and undoes whatever the HPA scaled to.
+      - RespectIgnoreDifferences=true
   # The HPA owns each Deployment's replica count at runtime. Without this,
   # ArgoCD would see the live replica count as drift and fight the autoscaler.
   ignoreDifferences:

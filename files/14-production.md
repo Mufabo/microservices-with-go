@@ -1,6 +1,6 @@
 # Chapter 14 --- Going to Production: Scaling, Secrets, Resilience, and Identity
 
-Snapvault is deployed on a self-healing cluster, provisioned from code, and observable from end to end. That is a real system --- but "it runs" and "it's ready for production traffic" are different claims. Production means a surge of uploads on a Saturday afternoon doesn't tip the thumbnailer over. It means a database password isn't sitting in a manifest. It means that when the metadata service has a bad ten minutes, users still see their feed instead of an error page, and that the broker holding the whole system together isn't one Pod away from taking everything down. And it means knowing who uploaded each photo. This final build chapter hardens Snapvault along exactly those lines: it scales on the signals we collected in Chapter 13, manages secrets properly, makes services and the broker resilient to partial failure, delivers the gateway aggregation we've deferred since Chapter 4, and puts real user authentication at the gateway.
+Snapvault is deployed on a self-healing cluster, provisioned from code, and observable from end to end. That is a real system --- but "it runs" and "it's ready for production traffic" are different claims. Production means a surge of uploads on a Saturday afternoon doesn't tip the thumbnailer over. It means a database password isn't sitting in a manifest. It means that when the metadata service has a bad ten minutes, users still see their feed instead of an error page, and that the broker holding the whole system together isn't one Pod away from taking everything down. And it means knowing who uploaded each photo. This final build chapter hardens Snapvault along exactly those lines: it scales on the signals we collected in Chapter 13, manages secrets properly, makes services and the broker resilient to partial failure, delivers the gateway aggregation we've deferred since Chapter 4, serves the gateway over HTTPS, and puts real user authentication behind it.
 
 ## Scaling with the load
 
@@ -80,7 +80,15 @@ Scaling has a floor and a ceiling for good reasons. `minReplicas: 1` on the work
 
 In Chapter 9 we created a Kubernetes Secret imperatively to get moving, and flagged that it was a starting point, not a destination. The problem with a plain Secret is that the credential lives in the cluster, base64-encoded, for anyone with the right RBAC to read, and it's disconnected from rotation --- change the database password and you must remember to update the Secret. The production pattern is to keep the value in **Google Secret Manager** (which we declared in Terraform in Chapter 11) and let Pods read it at runtime through workload identity, so it's never stored in the cluster at all.
 
-The cleanest mechanism on GKE is the **Secret Manager CSI driver**, which mounts secrets as files into the Pod. You declare which secrets a Pod needs with a `SecretProviderClass`:
+The cleanest mechanism on GKE is the **Secret Manager add-on**, a Google-managed CSI driver that mounts secrets as files into the Pod. (Autopilot doesn't let you install the open-source Secrets Store CSI driver yourself, because it needs a privileged DaemonSet; the add-on is the supported way.) Turn it on with one block on the cluster in `infra/gke.tf`:
+
+``` hcl
+  secret_manager_config {
+    enabled = true
+  }
+```
+
+You declare which secrets a Pod needs with a `SecretProviderClass`. It names the project, so it belongs in the prod overlay rather than the base:
 
 ``` yaml
 apiVersion: secrets-store.csi.x-k8s.io/v1
@@ -88,7 +96,7 @@ kind: SecretProviderClass
 metadata:
   name: snapvault-secrets
 spec:
-  provider: gcp
+  provider: gke
   parameters:
     secrets: |
       - resourceName: "projects/PROJECT_ID/secrets/snapvault-database-url/versions/latest"
@@ -97,7 +105,42 @@ spec:
         path: "mongo-uri"
 ```
 
-The Pod mounts this as a volume --- say at `/secrets` --- and the values appear as files the service reads at startup: `/secrets/database-url` and `/secrets/mongo-uri`. Grant the `snapvault-runtime` Google service account we bound via workload identity in Chapter 11 `roles/secretmanager.secretAccessor` on each secret (one `google_secret_manager_secret_iam_member` per secret in Terraform), so access is the Pod's own identity --- no key, no in-cluster copy, and a rotated secret in Secret Manager flows to new Pods on their next start. A small change to `config` reads a value from a file when a `*_FILE` variant is set, falling back to the plain environment variable for local development:
+Each Pod that needs a secret mounts a CSI volume backed by that class, and is told where the file is. In the feed Deployment:
+
+``` yaml
+      containers:
+        - name: feed
+          env:
+            - name: DATABASE_URL_FILE
+              value: /secrets/database-url
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: snapvault-secrets
+```
+
+Metadata gets the same volume with `MONGO_URI_FILE=/secrets/mongo-uri`. The add-on reads each secret as the Pod's own Kubernetes service account, `snapvault` in the `snapvault` namespace, through Workload Identity, so that identity needs `roles/secretmanager.secretAccessor` on each secret --- no key, no in-cluster copy, and a rotated secret in Secret Manager reaches new Pods on their next start. In Terraform the grant names the service account as a Workload Identity principal:
+
+``` hcl
+data "google_project" "this" {}
+
+resource "google_secret_manager_secret_iam_member" "feed_db" {
+  secret_id = google_secret_manager_secret.database_url.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "principal://iam.googleapis.com/projects/${data.google_project.this.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/snapvault/sa/snapvault"
+}
+```
+
+The companion repository's `infra/secrets.tf` makes one such grant per mounted secret, and declares the `snapvault-mongo-uri` secret next to Chapter 11's database URL. With every credential mounted this way, the `snapvault-secrets` Kubernetes Secret from Chapter 9 and the `secretRef` lines that injected it can be deleted: nothing in the cluster holds a credential any more.
+
+On the code side, a small change to `config` reads a value from a file when a `*_FILE` variant is set, falling back to the plain environment variable for local development:
 
 ``` go
 // FileOrEnv returns the contents of the file named by key+"_FILE" if that
@@ -113,9 +156,7 @@ func FileOrEnv(key string) string {
 }
 ```
 
-Both services that hold a secret switch to it: the feed service calls `config.FileOrEnv("DATABASE_URL")`, and the metadata service calls `config.FileOrEnv("MONGO_URI")` in place of the `config.MustString("MONGO_URI")` it used until now. Because `FileOrEnv` returns an empty string when neither variable is set, metadata checks for that and exits, keeping the fail-fast behavior `MustString` gave it.
-
-That switch is easy to forget for the *next* secret someone adds, and forgetting fails silently: a service that reads its secret with plain `MustString` never looks at the mounted file. So close the trap in `config` itself and make `MustString` file-aware too:
+Switching each service to it is easy to forget for the *next* secret someone adds, and forgetting fails silently: a service that reads its secret with plain `MustString` never looks at the mounted file. So close the trap in `config` itself and make `MustString` file-aware too:
 
 ``` go
 func MustString(key string) string {
@@ -126,7 +167,7 @@ func MustString(key string) string {
 }
 ```
 
-Now a required value is read the same way whichever helper a service uses, and the code paths can't drift apart. In the cluster, `DATABASE_URL_FILE=/secrets/database-url` and `MONGO_URI_FILE=/secrets/mongo-uri` point at the mounted files; on a laptop, `DATABASE_URL` and `MONGO_URI` hold the local connection strings. The code stays portable; only the source of the secret changes.
+Now a required value is read the same way whichever helper a service uses. The feed service reads `config.MustString("DATABASE_URL")`, so it fails fast if the secret is missing rather than handing `pgx` an empty connection string, and the metadata service reads `config.FileOrEnv("MONGO_URI")` and exits if that comes back empty. In the cluster, `DATABASE_URL_FILE` and `MONGO_URI_FILE` point at the mounted files; on a laptop, `DATABASE_URL` and `MONGO_URI` hold the local connection strings. The code stays portable; only the source of the secret changes.
 
 ## Resilience: surviving partial failure
 
@@ -230,8 +271,13 @@ func (g *Gateway) imageDetail(w http.ResponseWriter, r *http.Request) {
 
     wg.Wait()
 
-    if feedErr != nil {
-        http.Error(w, "not found", http.StatusNotFound)
+    switch {
+    case errors.Is(feedErr, errUpstreamNotFound):
+        http.Error(w, "not found", http.StatusNotFound) // the image doesn't exist
+        return
+    case feedErr != nil:
+        log.Error("feed unavailable", "id", id, "err", feedErr)
+        http.Error(w, "feed unavailable", http.StatusBadGateway) // it may well exist
         return
     }
 
@@ -257,9 +303,9 @@ func (g *Gateway) imageDetail(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-`fetchFeed` and `fetchMeta` are thin wrappers that `GET` `FEED_URL + "/feed/" + id` and `METADATA_URL + "/metadata/" + id`, forward the `X-Request-Id` from Chapter 13, and decode the JSON. They use an `http.Client` with an `otelhttp` transport and an overall 10-second timeout.
+`fetchFeed` and `fetchMeta` are thin wrappers that `GET` `FEED_URL + "/feed/" + url.PathEscape(id)` and the matching metadata URL, forward the `X-Request-Id` from Chapter 13, and decode the JSON. They share a `getJSON` helper that turns an upstream `404` into the sentinel error `errUpstreamNotFound` and any other non-`200` into an ordinary error. They use an `http.Client` with an `otelhttp` transport and an overall 10-second timeout. The `PathEscape` matters: `r.PathValue` returns the *decoded* segment, so a request for `/api/images/..%2Fmetrics` would otherwise send the feed service a path the gateway never meant to call.
 
-Two things make this production-grade rather than just concurrent. First, the two calls run in parallel, so the response is as slow as the *slower* dependency, not the *sum* --- latency that matters under load. Second, and more importantly, the two failures are treated differently by design: the feed is essential, so its failure is a 404; metadata is enrichment, so its failure produces a slightly thinner response with an honest `metadata_status` field, not an error. (One refinement worth making in your own code: treating *every* feed failure as a 404 tells a client "this image doesn't exist" when the truth may be "the feed is down." Distinguishing the feed's own 404 from a timeout or 5xx, and answering the latter with a 502 or 503, keeps the error honest too.) A Snapvault user whose metadata service is having a bad minute still sees their photo and their feed --- they just don't see tags for a little while, and most won't notice. That deliberate classification of dependencies into essential and optional is the heart of graceful degradation, and it's a decision only you can make, per endpoint.
+Two things make this production-grade rather than just concurrent. First, the two calls run in parallel, so the response is as slow as the *slower* dependency, not the *sum* --- latency that matters under load. Second, and more importantly, the two failures are treated differently by design: the feed is essential, so its failure fails the request; metadata is enrichment, so its failure produces a slightly thinner response with an honest `metadata_status` field, not an error. Even the essential failure is reported honestly: only the feed's own `404` becomes a `404`. A timeout or a 5xx becomes a `502 Bad Gateway`, because "the feed is down" is not "this image doesn't exist," and a client (or a cache) that hears the second will draw the wrong conclusion. A Snapvault user whose metadata service is having a bad minute still sees their photo and their feed --- they just don't see tags for a little while, and most won't notice. That deliberate classification of dependencies into essential and optional is the heart of graceful degradation, and it's a decision only you can make, per endpoint.
 
 ::: warning
 Graceful degradation is a choice you must make explicitly; it is never the default. The default behavior of "call a service, propagate its error" turns every dependency into a hard dependency, so one wobbling service fails every request that touches it. Go through your aggregating endpoints and decide, for each downstream call, whether it is essential (fail) or enrichment (degrade). Writing that decision into the code, as above, is what keeps a partial outage partial.
@@ -314,6 +360,73 @@ spec:
 ```
 
 And **resource requests** --- already required by Autopilot --- deserve a deliberate pass now that you have real latency and CPU data from Chapter 13's metrics. Set requests from observed usage, not guesswork: too low and Pods get throttled or evicted under load; too high and you pay for idle capacity, since Autopilot bills on requests. Observability isn't only for incidents; it's the input to right-sizing, and right-sizing is most of cost control on Autopilot, where you pay per Pod for exactly what you request.
+
+## HTTPS at the edge
+
+Since Chapter 9 the gateway has been a `LoadBalancer` Service on port 80: plain HTTP. That was tolerable while nothing secret crossed it. The next section changes that --- every upload will carry a bearer token, and a bearer token works for whoever holds it, so sending it in the clear hands it to anyone on the path. Production traffic needs TLS first.
+
+We don't terminate TLS in the gateway's Go code. GKE's **Ingress** creates a global external HTTPS load balancer in front of a Service, and a **ManagedCertificate** has Google issue and renew the certificate for your domain. The gateway Service becomes a plain `ClusterIP` --- so there is no longer an HTTP path around the load balancer --- annotated for container-native load balancing, which sends traffic straight to Pod IPs and health-checks them with the readiness probe:
+
+``` yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+spec:
+  type: ClusterIP
+  selector: { app: gateway }
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+The Ingress, the certificate, and a **FrontendConfig** that redirects HTTP to HTTPS go in the prod overlay, since the domain is per environment:
+
+``` yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: snapvault-gateway-ip
+    networking.gke.io/managed-certificates: gateway
+    networking.gke.io/v1beta1.FrontendConfig: gateway
+spec:
+  defaultBackend:
+    service:
+      name: gateway
+      port:
+        number: 80
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: gateway
+spec:
+  domains:
+    - snapvault.example.com
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: gateway
+spec:
+  redirectToHttps:
+    enabled: true
+```
+
+The load balancer claims a static IP by name, which Terraform reserves so the address outlives any one Ingress:
+
+``` hcl
+resource "google_compute_global_address" "gateway" {
+  name = "snapvault-gateway-ip"
+}
+```
+
+Point your domain's DNS `A` record at that address (the companion repository exposes it as the `gateway_ip` output). Google issues the certificate only once the domain resolves to the load balancer, so expect the first certificate to take a while; `kubectl describe managedcertificate gateway` shows its progress. Add the same domain to Identity Platform's authorized domains, so users can sign in from it.
 
 ## Who's uploading: identity at the gateway
 
@@ -507,12 +620,13 @@ But the most important lesson is the one from Chapter 1, and it's worth repeatin
 ### Summary
 
 -   The **HorizontalPodAutoscaler** scales the HTTP services and the CPU-bound thumbnailer on **CPU**, so a traffic spike becomes a self-draining queue, never a slow upload path. Scaling on **queue depth** directly is possible with an `External` metric, given the NATS exporter and the Custom Metrics Stackdriver Adapter.
--   Manage secrets with **Google Secret Manager** and the **CSI driver**, read at runtime via workload identity, so credentials never live in the cluster; a `*_FILE` config fallback keeps the same binary portable to a laptop.
+-   Manage secrets with **Google Secret Manager** and GKE's **Secret Manager add-on**, which mounts them as files read with the Pod's own workload identity, so credentials never live in the cluster; a `*_FILE` config fallback keeps the same binary portable to a laptop.
 -   Give every **outbound call a timeout**; **retry only idempotent operations** (Snapvault's consumer writes and reads are; the upload `POST` isn't) with exponential backoff **and jitter** to avoid thundering herds.
 -   **Graceful degradation** is an explicit, per-endpoint choice: classify each downstream dependency as essential (fail) or enrichment (serve a partial answer), and write that decision into the code.
 -   The **gateway aggregation** fans out to feed and metadata concurrently with independent timeouts, returns as slow as the slower call rather than their sum, and degrades when the optional dependency is down.
 -   Run **NATS as a 3-node cluster with replicated JetStream streams** (`Replicas: 3`) so neither the broker nor its messages depend on a single Pod.
 -   A **PodDisruptionBudget** preserves availability during voluntary disruptions; set **resource requests from observed metrics**, which is most of cost control on Autopilot.
+-   Put the gateway behind a GKE **Ingress** with a **ManagedCertificate** and an HTTP-to-HTTPS redirect, and make its Service `ClusterIP`, so tokens never cross the internet in the clear.
 -   **Identity Platform** signs users in and issues OIDC ID tokens. The gateway verifies them (`go-oidc`: signature, issuer, audience, expiry), derives `owner` from the token, and passes it inward in a header it strips from every client request. The gateway fails closed: no auth configuration, no start. A **NetworkPolicy** lets only the gateway (and the metrics collectors) reach images, so no other Pod can forge that header.
 -   The deepest lesson is Chapter 1's: this architecture is a cost as much as a capability --- adopt it when the workloads genuinely demand it, and build the monolith when they don't.
 

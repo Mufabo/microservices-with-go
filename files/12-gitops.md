@@ -36,6 +36,8 @@ Create a second Codeberg repository, `snapvault-config`, structured with Kustomi
           kustomization.yaml
           hpa.yaml          # the HPAs from Chapter 14
           pdb.yaml          # the PodDisruptionBudget from Chapter 14
+          secretproviderclass.yaml  # Secret Manager mounts, from Chapter 14
+          ingress.yaml      # HTTPS load balancer + certificate, from Chapter 14
 
 One edit happens on the way into `base/`: the image lines. In Chapter 9 each Deployment named its full registry path and a literal commit SHA. In the base, each names a short placeholder instead --- `image: snapvault/images:latest`, `snapvault/feed:latest`, and so on --- which is environment-neutral and never deployed as-is. The `base/kustomization.yaml` lists the shared resources, and the prod overlay layers environment-specific pieces on top and maps each placeholder to the real image it should run:
 
@@ -113,6 +115,7 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true   # see the warning below
   ignoreDifferences:
     - group: apps
       kind: Deployment
@@ -154,7 +157,7 @@ spec:
 The `releaseName` matters: it keeps the Service named `nats`, so `NATS_URL` doesn't change. ArgoCD adopts the existing objects rather than recreating them, and the broker's configuration now lives in Git like everything else. (This is the "direct chart" style from Chapter 10: Helm for third-party software, Kustomize for our own.)
 
 ::: warning
-The `ignoreDifferences` block is essential the moment you combine GitOps with autoscaling, and leaving it out causes a maddening bug. The HorizontalPodAutoscaler from Chapter 14 owns each Deployment's replica count, scaling it up and down with load. But the manifest in Git also specifies `replicas`, so without intervention ArgoCD sees the HPA's live value differ from Git, "corrects" it back, the HPA scales it again, ArgoCD reverts it again --- the two controllers fight, and your replica count oscillates. Telling ArgoCD to ignore `/spec/replicas` on Deployments hands that field to the HPA and ends the war. Whenever something *other* than Git is the rightful owner of a field, `ignoreDifferences` is how you say so.
+The `ignoreDifferences` block is essential the moment you combine GitOps with autoscaling, and leaving it out causes a maddening bug. The HorizontalPodAutoscaler from Chapter 14 owns each Deployment's replica count, scaling it up and down with load. But the manifest in Git also specifies `replicas`, so without intervention ArgoCD sees the HPA's live value differ from Git, "corrects" it back, the HPA scales it again, ArgoCD reverts it again --- the two controllers fight, and your replica count oscillates. Telling ArgoCD to ignore `/spec/replicas` on Deployments hands that field to the HPA and ends the war --- but only with the `RespectIgnoreDifferences=true` sync option next to it. By default `ignoreDifferences` affects only the *diff*: it stops the endless correction loop, but when a sync does happen for another reason, such as CI promoting a new image tag, ArgoCD applies the whole manifest, `replicas: 2` included, and every deploy knocks a scaled-up Deployment back to two Pods. The sync option makes ArgoCD leave ignored fields out of what it applies. Whenever something *other* than Git is the rightful owner of a field, `ignoreDifferences` plus `RespectIgnoreDifferences` is how you say so.
 :::
 
 ## Many apps from one declaration
@@ -244,7 +247,7 @@ Step back and notice the shift. Deployment is no longer an action a person takes
 -   Keep a separate **config repository** for manifests (the Chapter 9 YAML), structured with Kustomize as `base` plus per-environment `overlays`, so deployment changes don't churn the application repo. Base manifests use placeholder image names (`snapvault/<svc>`) that the overlay's `images:` list maps to real, tagged images.
 -   Third-party software like **NATS** gets its own Application pointing directly at its Helm chart, so the broker is under GitOps too.
 -   Install ArgoCD with `kubectl apply --server-side --force-conflicts` (the CRDs are too large for client-side apply); better, **bootstrap it from Terraform's Helm provider** so Terraform's only workload is ArgoCD and Git drives the rest.
--   An Application with `automated` sync (`prune` + `selfHeal`) means a commit is the deploy and the cluster can't drift; **`ignoreDifferences` on `/spec/replicas`** is mandatory so ArgoCD doesn't fight the HPA from Chapter 14.
+-   An Application with `automated` sync (`prune` + `selfHeal`) means a commit is the deploy and the cluster can't drift; **`ignoreDifferences` on `/spec/replicas`**, with the `RespectIgnoreDifferences=true` sync option, is mandatory so ArgoCD doesn't fight the HPA from Chapter 14.
 -   Scale to many apps and environments with an **ApplicationSet** (or App of Apps) generated from one template.
 -   Close the loop from Chapter 8 by having CI write the new image tag into the config repo (`kustomize edit set image`) in a single **promote** job --- deploying deliberately, with no cluster credentials, just write access to a repo.
 

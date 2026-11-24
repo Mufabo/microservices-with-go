@@ -293,7 +293,7 @@ $ kubectl get service gateway -w
 When the `EXTERNAL-IP` changes from `<pending>` to a real address, Snapvault is on the internet. Visiting it hits a gateway Pod, which proxies `/images/` and `/api/...` to the internal Services exactly as it did under Compose.
 
 ::: tip
-A raw `LoadBalancer` Service is the simplest path and great for getting traffic flowing. For production you'll usually want a **GKE Gateway** or **Ingress** in front instead: it gives you a Google-managed TLS certificate, HTTP-to-HTTPS redirects, and host/path routing, all without terminating TLS in your own code. The gateway service stays exactly the same behind it --- only the Service type and an extra Gateway object change.
+A raw `LoadBalancer` Service is the simplest path and great for getting traffic flowing. For production you'll usually want a **GKE Gateway** or **Ingress** in front instead: it gives you a Google-managed TLS certificate, HTTP-to-HTTPS redirects, and host/path routing, all without terminating TLS in your own code. The gateway service stays exactly the same behind it --- only the Service type and an extra Ingress or Gateway object change. Chapter 14 makes that switch, before the gateway starts accepting bearer tokens.
 :::
 
 ## Running NATS in the cluster

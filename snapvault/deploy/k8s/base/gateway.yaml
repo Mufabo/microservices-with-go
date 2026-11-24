@@ -19,7 +19,6 @@ spec:
             - containerPort: 8080
           envFrom:
             - configMapRef: { name: snapvault-config }
-            - secretRef: { name: snapvault-secrets }
           readinessProbe:
             httpGet: { path: /health/ready, port: 8080 }
             initialDelaySeconds: 3
@@ -32,12 +31,20 @@ spec:
             requests: { cpu: 250m, memory: 128Mi }
             limits: { memory: 256Mi }
 ---
+# ClusterIP, not LoadBalancer: the public way in is the HTTPS load balancer
+# that the prod overlay's Ingress creates, which terminates TLS with a
+# Google-managed certificate. A LoadBalancer Service would also expose plain
+# HTTP, and the upload route carries bearer tokens.
 apiVersion: v1
 kind: Service
 metadata:
   name: gateway
+  annotations:
+    # Route the load balancer straight to Pod IPs (container-native load
+    # balancing), using the readiness probe as its health check.
+    cloud.google.com/neg: '{"ingress": true}'
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector: { app: gateway }
   ports:
     - port: 80

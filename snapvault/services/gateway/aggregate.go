@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -31,8 +33,13 @@ type imageMeta struct {
 	Tags         []string `json:"tags,omitempty"`
 }
 
+// errUpstreamNotFound reports that an upstream service answered 404.
+var errUpstreamNotFound = errors.New("upstream: not found")
+
 // imageDetail aggregates two upstream calls into one response. The feed entry
-// is essential — without it there is nothing to show, so its absence is a 404.
+// is essential — without it there is nothing to show, so its absence is a 404,
+// and a feed that can't answer at all (timeout, 5xx) is a 502: the image may
+// well exist, and telling the client otherwise would be a lie.
 // Metadata is enrichment: if it is slow or down, the response still returns,
 // marked so the client knows the enrichment is missing. The two calls run
 // concurrently so the response is as fast as the slower essential call.
@@ -71,8 +78,13 @@ func (g *Gateway) imageDetail(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
-	if feedErr != nil {
+	switch {
+	case errors.Is(feedErr, errUpstreamNotFound):
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	case feedErr != nil:
+		log.Error("feed unavailable", "id", id, "err", feedErr)
+		http.Error(w, "feed unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -100,7 +112,7 @@ func (g *Gateway) imageDetail(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) fetchFeed(ctx context.Context, id string) (*feedItem, error) {
 	var fi feedItem
-	if err := g.getJSON(ctx, g.feedURL+"/feed/"+id, &fi); err != nil {
+	if err := g.getJSON(ctx, g.feedURL+"/feed/"+url.PathEscape(id), &fi); err != nil {
 		return nil, err
 	}
 	return &fi, nil
@@ -108,7 +120,7 @@ func (g *Gateway) fetchFeed(ctx context.Context, id string) (*feedItem, error) {
 
 func (g *Gateway) fetchMeta(ctx context.Context, id string) (*imageMeta, error) {
 	var m imageMeta
-	if err := g.getJSON(ctx, g.metaURL+"/metadata/"+id, &m); err != nil {
+	if err := g.getJSON(ctx, g.metaURL+"/metadata/"+url.PathEscape(id), &m); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -127,6 +139,9 @@ func (g *Gateway) getJSON(ctx context.Context, rawURL string, dst any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return errUpstreamNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("upstream %s returned %d", rawURL, resp.StatusCode)
 	}
