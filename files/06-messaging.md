@@ -211,7 +211,7 @@ The images service now calls `storage.NewFromEnv(ctx)` instead of constructing i
 
 ## Publishing the upload event
 
-With the contract and connection in place, the images service's upload handler gains one responsibility: after storing the original, announce it. The handler now closes over a `jetstream.JetStream` as well as the store, and keeps Chapter 5's size limit:
+With the contract and connection in place, the images service's upload handler gains one responsibility: after storing the original, announce it. The handler now closes over a `jetstream.JetStream` as well as the store, and keeps Chapter 5's size limit and format check:
 
 ``` go
 func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) http.HandlerFunc {
@@ -228,6 +228,18 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
         }
         defer file.Close()
 
+        // Chapter 5's check: only real JPEG, PNG, or GIF files are stored.
+        _, format, err := image.DecodeConfig(file)
+        if err != nil || !allowedFormats[format] {
+            http.Error(w, "unsupported image: upload a JPEG, PNG, or GIF",
+                http.StatusUnsupportedMediaType)
+            return
+        }
+        if _, err := file.Seek(0, io.SeekStart); err != nil {
+            http.Error(w, "invalid upload", http.StatusBadRequest)
+            return
+        }
+
         owner := r.FormValue("owner")
         if owner == "" {
             owner = "anonymous"
@@ -235,10 +247,7 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
 
         id := newID()
         key := "originals/" + id
-        ct := hdr.Header.Get("Content-Type")
-        if ct == "" {
-            ct = "application/octet-stream"
-        }
+        ct := "image/" + format
         if err := blobs.Put(r.Context(), key, ct, file); err != nil {
             log.Error("store upload", "id", id, "err", err)
             http.Error(w, "could not store image", http.StatusInternalServerError)
@@ -344,7 +353,7 @@ func main() {
     cc, err := cons.Consume(func(msg jetstream.Msg) {
         if err := handle(ctx, blobs, js, msg, log); err != nil {
             log.Error("processing failed; will retry", "err", err)
-            _ = msg.Nak()
+            _ = natsutil.NakWithBackoff(msg) // see "Retrying without burning attempts"
             return
         }
         _ = msg.Ack()
@@ -364,7 +373,7 @@ func main() {
 }
 ```
 
-The consumer configuration encodes the worker's reliability policy. `AckExplicitPolicy` means a message is only done when we call `Ack`. `AckWait: 30s` means if we haven't acked within thirty seconds the broker assumes we died and redelivers. `MaxDeliver: 5` caps redelivery attempts so a permanently broken message doesn't loop forever. And because the consumer is `Durable: "thumbnailer"`, a restarted worker resumes exactly where it left off.
+The consumer configuration encodes the worker's reliability policy. `AckExplicitPolicy` means a message is only done when we call `Ack`. `AckWait: 30s` means if we haven't acked within thirty seconds the broker assumes we died and redelivers. `MaxDeliver: 5` caps redelivery attempts so a permanently broken message doesn't loop forever --- which also means those five attempts are precious, a point we'll come back to shortly. And because the consumer is `Durable: "thumbnailer"`, a restarted worker resumes exactly where it left off.
 
 The durable consumer also gives us scaling for free. Run two or ten copies of the worker and they all bind to the same `thumbnailer` consumer; JetStream hands each message to exactly one of them. This is the **competing consumers** pattern: adding workers adds throughput, with no coordination code at all. Chapters 9 and 14 lean on it.
 
@@ -382,6 +391,7 @@ import (
     _ "image/gif"  // register decoders by importing for side effects
     "image/jpeg"
     _ "image/png"
+    "io"
     "log/slog"
     "time"
 
@@ -394,6 +404,9 @@ import (
 )
 
 const thumbMax = 320 // longest edge, in pixels
+
+// maxPixels caps the images we'll decode: 40 megapixels is a 160 MB bitmap.
+const maxPixels = 40_000_000
 
 func handle(ctx context.Context, blobs storage.Blob, js jetstream.JetStream,
     msg jetstream.Msg, log *slog.Logger) error {
@@ -411,9 +424,21 @@ func handle(ctx context.Context, blobs storage.Blob, js jetstream.JetStream,
     if err != nil {
         return fmt.Errorf("get original %q: %w", ev.ObjectName, err)
     }
-    defer rc.Close()
+    original, err := io.ReadAll(rc)
+    rc.Close()
+    if err != nil {
+        return fmt.Errorf("read original %q: %w", ev.ObjectName, err)
+    }
 
-    src, _, err := image.Decode(rc)
+    // Read the header first: Decode allocates the whole bitmap up front, so
+    // check the declared size before letting it.
+    cfg, _, err := image.DecodeConfig(bytes.NewReader(original))
+    if err != nil || int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+        log.Error("undecodable or oversized image; terminating", "id", ev.ID, "err", err)
+        _ = msg.Term()
+        return nil
+    }
+    src, _, err := image.Decode(bytes.NewReader(original))
     if err != nil {
         log.Error("undecodable image; terminating", "id", ev.ID, "err", err)
         _ = msg.Term()
@@ -468,9 +493,36 @@ func scaleToFit(src image.Image, max int) image.Image {
 
 The distinction between `Nak` and `Term` is the worker's error philosophy in miniature. A *transient* failure --- storage briefly unreachable, a publish that timed out --- gets `Nak`: try again, the next attempt may succeed. A *permanent* failure --- a message that isn't valid JSON, or bytes that aren't a decodable image --- gets `Term`: retrying will never help, so drop it deliberately rather than let it consume five delivery attempts and clog the consumer. Knowing which errors are which is the difference between a worker that recovers and one that wedges.
 
-::: tip
-**Image decoding is a security boundary.** The worker decodes bytes that an untrusted user uploaded, using Go's standard image decoders. Those decoders are memory-safe, which already puts you ahead of the C libraries that have produced a long history of image-parsing exploits --- but in production you'd also cap the dimensions you'll decode (a "decompression bomb" can be tiny on disk and enormous in memory) and run this worker with tight resource limits, which Kubernetes provides in Chapter 9.
+::: warning
+**Image decoding is a security boundary.** The worker decodes bytes that an untrusted user uploaded, using Go's standard image decoders. Those decoders are memory-safe, which already puts you ahead of the C libraries that have produced a long history of image-parsing exploits --- but memory-safe is not memory-*bounded*. `image.Decode` allocates the full bitmap before it reads a single pixel, up to four bytes per pixel, so a "decompression bomb" --- a file of a few kilobytes whose header declares 50000×50000 --- asks for 10 GB. Without a check, that kills the worker with an out-of-memory error, and because the message was never acknowledged, JetStream redelivers it and kills the next one too. That's why `handle` calls `image.DecodeConfig` first, which reads only the header, and `Term`s anything over `maxPixels`. The cap is sized against the worker's memory limit, which Kubernetes enforces in Chapter 9.
 :::
+
+## Retrying without burning attempts
+
+There's a trap in `Nak`. A plain `Nak` asks for redelivery *immediately*, so a consumer with `MaxDeliver: 5` can spend all five attempts in well under a second. If storage has a ten-second hiccup, the message fails five times in a row, runs out of deliveries, and is never processed --- exactly the loss the stream was supposed to prevent. Retries only help if they're spread over a span of time a dependency can actually recover in. JetStream lets the consumer say how long to wait with `NakWithDelay`, and each message's metadata says which attempt this is, so a small helper in `natsutil` turns the five attempts into an exponential backoff:
+
+``` go
+// NakWithBackoff asks JetStream to redeliver msg after a delay that grows with
+// each failed attempt: 5s, 15s, 45s, then 2m.
+func NakWithBackoff(msg jetstream.Msg) error {
+    delivered := uint64(1)
+    if md, err := msg.Metadata(); err == nil {
+        delivered = md.NumDelivered
+    }
+    return msg.NakWithDelay(RetryDelay(delivered))
+}
+
+// RetryDelay is the redelivery delay after delivery attempt n (1-based) fails.
+func RetryDelay(n uint64) time.Duration {
+    d := 5 * time.Second
+    for i := uint64(1); i < n && d < 2*time.Minute; i++ {
+        d *= 3
+    }
+    return min(d, 2*time.Minute)
+}
+```
+
+Five attempts now cover about three minutes instead of a fraction of a second, which rides out a database failover or a broker restart. Every consumer in Snapvault uses `natsutil.NakWithBackoff` wherever it would have called `Nak`. `Term` is unchanged: a permanent failure still stops at once.
 
 ## Consumers that keep data in sync
 
@@ -507,7 +559,7 @@ cc, err := cons.Consume(func(msg jetstream.Msg) {
     }
     if err := store.Upsert(ctx, m); err != nil {
         log.Error("upsert metadata", "id", ev.ID, "err", err)
-        _ = msg.Nak()
+        _ = natsutil.NakWithBackoff(msg)
         return
     }
     _ = msg.Ack()
@@ -560,7 +612,7 @@ func (s *feedStore) SetThumb(ctx context.Context, id, thumbObject string, w, h i
 }
 ```
 
-Then the consumer dispatches by subject, and answers that particular error with a *delayed* `Nak`, giving the upload event time to land before the next attempt:
+Then the consumer dispatches by subject, and answers that particular error with a *delayed* `Nak` --- the same backoff as any other retry --- giving the upload event time to land before the next attempt. Using the full backoff matters here: if the upload event is itself being retried, it may take a minute or two to apply, and the thumbnail must keep trying at least that long:
 
 ``` go
 cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
@@ -594,7 +646,7 @@ cc, err := cons.Consume(func(msg jetstream.Msg) {
         }
         err := store.SetThumb(ctx, ev.ID, ev.ThumbObject, ev.Width, ev.Height)
         if errors.Is(err, errNoFeedItem) {
-            _ = msg.NakWithDelay(5 * time.Second) // row not there yet; try later
+            _ = natsutil.NakWithBackoff(msg) // row not there yet; try later
             return
         }
         ackOrNak(msg, err, log)
@@ -609,7 +661,7 @@ if err != nil {
 defer cc.Stop()
 ```
 
-where `ackOrNak` is the obvious helper that `Ack`s on success and `Nak`s on error. The feed stores the thumbnail's object key (`thumbs/<id>.jpg`), not a URL: how that key is served is the gateway's business, and it can change without touching a single feed row. This service is now a clean example of a **read model** built from events: it listens to what happened across the system and maintains a Postgres table shaped exactly for the one query it serves. That is the essence of the pattern often called CQRS --- the feed never queries another service to render the gallery; it has already assembled everything it needs from the event stream.
+where `ackOrNak` is the obvious helper that `Ack`s on success and calls `natsutil.NakWithBackoff` on error. The feed stores the thumbnail's object key (`thumbs/<id>.jpg`), not a URL: how that key is served is the gateway's business, and it can change without touching a single feed row. This service is now a clean example of a **read model** built from events: it listens to what happened across the system and maintains a Postgres table shaped exactly for the one query it serves. That is the essence of the pattern often called CQRS --- the feed never queries another service to render the gallery; it has already assembled everything it needs from the event stream.
 
 ::: note
 **Eventual consistency, in the flesh.** For a few moments after an upload, the feed may show the image without a thumbnail, and a thumbnail event may even arrive before the row it belongs to. Neither is an error. The delayed `Nak` above turns "arrived too early" into "applied a few seconds later," and the image is then fully in place. This is *eventual consistency*: the system is briefly not-quite-right and then becomes right, with no data lost. Notice that "no data lost" had to be *engineered*: the first, naive version of `SetThumb` silently dropped early thumbnails. Every handler in an event-driven system deserves the question "what if this arrives first?" Designing so that "briefly wrong, then correct" is acceptable --- rather than demanding "always perfectly consistent across services," which distributed systems cannot cheaply provide --- is the central mental shift of event-driven architecture.
@@ -629,6 +681,8 @@ Add the broker to `compose.yaml` and give every service its address:
   # add to images, thumbnails, metadata, and feed:
   #   environment:
   #     NATS_URL: nats://nats:4222
+  # and give images the restart policy the others already have:
+  #   restart: unless-stopped
 
   thumbnails:
     build:
@@ -641,6 +695,7 @@ Add the broker to `compose.yaml` and give every service its address:
     volumes:
       - images-data:/data        # shares originals/thumbs with images locally
     depends_on: [nats]
+    restart: unless-stopped
 
 volumes:
   images-data:

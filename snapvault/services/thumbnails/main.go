@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -131,14 +132,20 @@ func (w *worker) handle(msg jetstream.Msg) {
 	src, err := w.blob.Get(ctx, evt.ObjectName)
 	if err != nil {
 		log.Error("download original failed; will retry", "err", err)
-		_ = msg.Nak()
+		_ = natsutil.NakWithBackoff(msg)
 		return
 	}
-	defer src.Close()
-
-	thumb, width, height, err := generateThumbnail(src)
+	original, err := io.ReadAll(src)
+	_ = src.Close()
 	if err != nil {
-		// A corrupt or unsupported image won't decode on retry either.
+		log.Error("read original failed; will retry", "err", err)
+		_ = natsutil.NakWithBackoff(msg)
+		return
+	}
+
+	thumb, width, height, err := generateThumbnail(original)
+	if err != nil {
+		// A corrupt, unsupported, or oversized image won't succeed on retry.
 		log.Error("thumbnail generation failed; terminating", "err", err)
 		_ = msg.Term()
 		return
@@ -147,7 +154,7 @@ func (w *worker) handle(msg jetstream.Msg) {
 	thumbObject := "thumbs/" + evt.ID + ".jpg"
 	if err := w.blob.Put(ctx, thumbObject, "image/jpeg", bytes.NewReader(thumb)); err != nil {
 		log.Error("store thumbnail failed; will retry", "err", err)
-		_ = msg.Nak()
+		_ = natsutil.NakWithBackoff(msg)
 		return
 	}
 
@@ -160,7 +167,7 @@ func (w *worker) handle(msg jetstream.Msg) {
 	}
 	if err := w.publish(ctx, events.SubjectThumbnailed, done); err != nil {
 		log.Error("publish thumbnailed failed; will retry", "err", err)
-		_ = msg.Nak()
+		_ = natsutil.NakWithBackoff(msg)
 		return
 	}
 

@@ -50,3 +50,32 @@ func EnsureStream(ctx context.Context, js jetstream.JetStream, name string, subj
 	})
 	return err
 }
+
+// Redelivery delays for NakWithBackoff: the first retry waits firstRetryDelay,
+// each later one three times longer, up to maxRetryDelay.
+const (
+	firstRetryDelay = 5 * time.Second
+	maxRetryDelay   = 2 * time.Minute
+)
+
+// NakWithBackoff asks JetStream to redeliver msg after a delay that grows with
+// each failed attempt: 5s, 15s, 45s, then 2m. A plain Nak redelivers at once,
+// so a consumer with MaxDeliver: 5 would spend every attempt inside a
+// one-second outage and then drop the message. Spaced out, the same five
+// attempts give a dependency about three minutes to come back.
+func NakWithBackoff(msg jetstream.Msg) error {
+	delivered := uint64(1)
+	if md, err := msg.Metadata(); err == nil {
+		delivered = md.NumDelivered
+	}
+	return msg.NakWithDelay(RetryDelay(delivered))
+}
+
+// RetryDelay is the redelivery delay after delivery attempt n (1-based) fails.
+func RetryDelay(n uint64) time.Duration {
+	d := firstRetryDelay
+	for i := uint64(1); i < n && d < maxRetryDelay; i++ {
+		d *= 3
+	}
+	return min(d, maxRetryDelay)
+}

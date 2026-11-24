@@ -102,7 +102,7 @@ default:
 **Credentials you never see in code.** The GCS client authenticates through *Application Default Credentials*: locally it uses the login from `gcloud auth application-default login`; on GKE it uses the pod's Workload Identity (Chapter 9), with no key file anywhere. Notice there is no API key or secret in the code above --- and there never should be. Hard-coded cloud credentials are the single most common way private buckets become public breaches.
 :::
 
-With `Put` in place we can add an upload handler, the entry point for new photos. It caps the request size, stores the original under `originals/<id>`, and returns a generated ID:
+With `Put` in place we can add an upload handler, the entry point for new photos. It caps the request size, checks that the file really is an image, stores the original under `originals/<id>`, and returns a generated ID:
 
 ``` go
 const maxUploadBytes = 25 << 20 // 25 MiB
@@ -122,11 +122,20 @@ func uploadImage(store blobStore, log *slog.Logger) http.HandlerFunc {
         }
         defer file.Close()
 
-        id := newID()
-        ct := hdr.Header.Get("Content-Type")
-        if ct == "" {
-            ct = "application/octet-stream"
+        // Trust the file's bytes, not the client's Content-Type header.
+        _, format, err := image.DecodeConfig(file)
+        if err != nil || !allowedFormats[format] {
+            http.Error(w, "unsupported image: upload a JPEG, PNG, or GIF",
+                http.StatusUnsupportedMediaType)
+            return
         }
+        if _, err := file.Seek(0, io.SeekStart); err != nil {
+            http.Error(w, "invalid upload", http.StatusBadRequest)
+            return
+        }
+
+        id := newID()
+        ct := "image/" + format
         if err := store.Put(r.Context(), "originals/"+id, ct, file); err != nil {
             log.Error("store upload", "id", id, "err", err)
             http.Error(w, "could not store image", http.StatusInternalServerError)
@@ -140,6 +149,9 @@ func uploadImage(store blobStore, log *slog.Logger) http.HandlerFunc {
     }
 }
 
+// allowedFormats are the image.DecodeConfig format names we accept.
+var allowedFormats = map[string]bool{"jpeg": true, "png": true, "gif": true}
+
 // newID returns a random 128-bit hex identifier.
 func newID() string {
     var b [16]byte
@@ -150,10 +162,16 @@ func newID() string {
 
 `http.MaxBytesReader` is the line people forget. Without it, anyone can stream an arbitrarily large body at the service and fill its memory or disk; with it, the read fails once the limit is passed and the client gets a `400`.
 
-Uploads now live under `originals/<id>` --- and, from Chapter 6 on, thumbnails under `thumbs/<id>.jpg` --- so the Chapter 2 `serveImage`, which read the bare request path as the key, would no longer find them. Give it a key prefix, and let it sniff the content type instead of assuming JPEG, since uploads can be PNG or GIF too:
+The format check is the other line that matters. `image.DecodeConfig` reads just the file's header and reports which registered decoder recognized it --- `"jpeg"`, `"png"`, or `"gif"`, once those packages are imported for their side effects (`_ "image/jpeg"` and so on). Anything else, including a file whose header *claims* `image/jpeg` but whose bytes are an HTML page, gets a `415 Unsupported Media Type` and is never stored. The stored content type then comes from what the bytes actually are. A `multipart.File` is seekable, so after peeking at the header we rewind and store the whole file.
+
+Uploads now live under `originals/<id>` --- and, from Chapter 6 on, thumbnails under `thumbs/<id>.jpg` --- so the Chapter 2 `serveImage`, which read the bare request path as the key, would no longer find them. Give it a key prefix, and let it sniff the content type instead of assuming JPEG, since uploads can be PNG or GIF too --- but only ever *declare* an image type:
 
 ``` go
-// serveImage streams the object at prefix+{name}, sniffing its content type.
+// servableTypes are the only content types serveImage ever declares.
+var servableTypes = map[string]bool{"image/jpeg": true, "image/png": true, "image/gif": true}
+
+// serveImage streams the object at prefix+{name}, sniffing its content type
+// but declaring only image types.
 func serveImage(store blobStore, prefix string) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         rc, err := store.Get(r.Context(), prefix+r.PathValue("name"))
@@ -164,16 +182,25 @@ func serveImage(store blobStore, prefix string) http.HandlerFunc {
         defer rc.Close()
 
         buf := bufio.NewReader(rc)
+        ct := "application/octet-stream"
         if peek, _ := buf.Peek(512); len(peek) > 0 {
-            w.Header().Set("Content-Type", http.DetectContentType(peek))
+            if sniffed := http.DetectContentType(peek); servableTypes[sniffed] {
+                ct = sniffed
+            }
         }
+        w.Header().Set("Content-Type", ct)
+        w.Header().Set("X-Content-Type-Options", "nosniff")
         w.Header().Set("Cache-Control", "public, max-age=86400")
         _, _ = io.Copy(w, buf)
     }
 }
 ```
 
-Add `"bufio"`, `"crypto/rand"`, `"encoding/hex"`, and `"encoding/json"` to the imports, and register the routes:
+::: warning
+**User uploads are served from your own origin.** In Chapter 6 the gateway proxies these bytes to the public, so they arrive from the same origin as the rest of Snapvault. `http.DetectContentType` happily recognizes HTML, so a handler that declared whatever it sniffed would serve an uploaded HTML page as `text/html`, and any script in it would run with your site's privileges. That's a stored cross-site scripting hole. The upload check keeps non-images out of storage, and `serveImage` is the second line of defense: it never declares anything but an image type, and `X-Content-Type-Options: nosniff` tells the browser not to second-guess the type it was given.
+:::
+
+Add `"bufio"`, `"crypto/rand"`, `"encoding/hex"`, `"encoding/json"`, and `"image"` to the imports, plus the decoders for side effects (`_ "image/gif"`, `_ "image/jpeg"`, `_ "image/png"`), and register the routes:
 
 ``` go
 mux.HandleFunc("POST /images", uploadImage(store, log))
@@ -414,6 +441,7 @@ Local development should run the real databases, not mocks. Extend `compose.yaml
       MONGO_URI: mongodb://mongo:27017
       MONGO_DB: snapvault
     depends_on: [mongo]
+    restart: unless-stopped
 
   feed:
     build:
@@ -423,6 +451,7 @@ Local development should run the real databases, not mocks. Extend `compose.yaml
       PORT: "8080"
       DATABASE_URL: postgres://snapvault:snapvault@postgres:5432/snapvault?sslmode=disable
     depends_on: [postgres]
+    restart: unless-stopped
 
 volumes:
   images-data:
@@ -430,7 +459,9 @@ volumes:
   pg-data:
 ```
 
-Notice that the official `mongo` and `postgres` images *do* contain a shell, so unlike our distroless service images they could carry Compose healthchecks if we wanted to gate startup on them. More importantly, notice the topology now matches the architecture diagram from the front matter: images talks to object storage, metadata owns Mongo, feed owns Postgres, and no service reaches into another's store. The Snapvault on your laptop is now genuinely the system this book set out to build --- it is just missing the nervous system that connects the parts. That nervous system is messaging.
+The `restart: unless-stopped` lines are Chapter 4's lesson put to work. On the very first `docker compose up`, Postgres spends several seconds initializing its data directory before it accepts connections, and the feed service, started the moment the Postgres container exists, fails to create its schema and exits. Rather than teach every service to wait, we let it fail fast and have Compose start it again until the database is ready. That is the same crash-and-restart loop Kubernetes runs for us in Chapter 9, so the services behave identically in both places. Every service that connects to something at startup gets this line; the images service gets it too once it depends on NATS in Chapter 6.
+
+Notice also that the official `mongo` and `postgres` images *do* contain a shell, so unlike our distroless service images they could carry Compose healthchecks if we wanted to gate startup on them. More importantly, notice the topology now matches the architecture diagram from the front matter: images talks to object storage, metadata owns Mongo, feed owns Postgres, and no service reaches into another's store. The Snapvault on your laptop is now genuinely the system this book set out to build --- it is just missing the nervous system that connects the parts. That nervous system is messaging.
 
 ::: warning
 **Those passwords are for your laptop only.** The `snapvault/snapvault` credentials above are fine for a local Compose stack and nowhere else. Real databases get strong, unique secrets delivered through a secrets manager, never committed to a repository --- exactly the practice Chapter 14 sets up with Google Secret Manager. Treat any credential that appears in a YAML file as disposable and local by definition.

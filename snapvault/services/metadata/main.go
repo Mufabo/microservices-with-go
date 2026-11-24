@@ -134,7 +134,7 @@ func (s *service) handle(msg jetstream.Msg) {
 	}
 	if err := s.store.Upsert(ctx, meta); err != nil {
 		s.log.Error("upsert failed; will retry", "id", evt.ID, "err", err)
-		_ = msg.Nak()
+		_ = natsutil.NakWithBackoff(msg)
 		return
 	}
 	s.log.Info("metadata stored", "id", evt.ID)

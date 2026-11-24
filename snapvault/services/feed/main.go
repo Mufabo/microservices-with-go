@@ -29,11 +29,6 @@ import (
 
 const defaultFeedLimit = 50
 
-// thumbRetryDelay spaces out redeliveries of a thumbnail whose feed row does
-// not exist yet, so the matching upload event has time to be applied before
-// the consumer's MaxDeliver attempts run out.
-const thumbRetryDelay = 5 * time.Second
-
 type service struct {
 	store *feedStore
 	log   *slog.Logger
@@ -118,8 +113,9 @@ func main() {
 // images.thumbnailed fills in the thumbnail. Stream order alone does not
 // guarantee the row exists first: with several feed replicas the two events can
 // be handled by different Pods, and a Nak'd upload is redelivered after the
-// thumbnail. A thumbnail with no row yet is therefore retried after a delay
-// rather than acknowledged and lost.
+// thumbnail. A thumbnail with no row yet is therefore retried with backoff
+// rather than acknowledged and lost. It gets the same backoff schedule as a
+// failed upload event, so it keeps retrying for as long as that event might.
 func (s *service) handle(msg jetstream.Msg) {
 	ctx := otel.GetTextMapPropagator().Extract(context.Background(),
 		telemetry.NatsHeaderCarrier(msg.Headers()))
@@ -136,7 +132,7 @@ func (s *service) handle(msg jetstream.Msg) {
 			ID: evt.ID, Owner: evt.Owner, UploadedAt: evt.UploadedAt,
 		}); err != nil {
 			s.log.Error("add feed item failed; will retry", "id", evt.ID, "err", err)
-			_ = msg.Nak()
+			_ = natsutil.NakWithBackoff(msg)
 			return
 		}
 		s.log.Info("feed item added", "id", evt.ID)
@@ -151,12 +147,12 @@ func (s *service) handle(msg jetstream.Msg) {
 		err := s.store.SetThumb(ctx, evt.ID, evt.ThumbObject, evt.Width, evt.Height)
 		if errors.Is(err, errNoFeedItem) {
 			s.log.Warn("thumbnail arrived before its feed item; retrying", "id", evt.ID)
-			_ = msg.NakWithDelay(thumbRetryDelay)
+			_ = natsutil.NakWithBackoff(msg)
 			return
 		}
 		if err != nil {
 			s.log.Error("attach thumbnail failed; will retry", "id", evt.ID, "err", err)
-			_ = msg.Nak()
+			_ = natsutil.NakWithBackoff(msg)
 			return
 		}
 		s.log.Info("feed thumbnail attached", "id", evt.ID)

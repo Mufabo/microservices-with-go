@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
 	"image"
+	"image/png"
 	"testing"
 )
 
@@ -27,5 +32,43 @@ func TestScaleToFit(t *testing.T) {
 					c.w, c.h, b.Dx(), b.Dy(), c.wantW, c.wantH)
 			}
 		})
+	}
+}
+
+// A tiny file that declares enormous dimensions must be refused from its
+// header, before the decoder allocates a bitmap for it.
+func TestGenerateThumbnail_refusesHugeDimensions(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewGray(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()
+	// Rewrite the IHDR chunk to claim 50000x50000 (a 10 GB RGBA bitmap) and
+	// fix its CRC so the header still parses. IHDR's type starts at byte 12,
+	// its data (width, height, ...) at 16, and its CRC follows 13 data bytes.
+	binary.BigEndian.PutUint32(b[16:], 50000)
+	binary.BigEndian.PutUint32(b[20:], 50000)
+	binary.BigEndian.PutUint32(b[29:], crc32.ChecksumIEEE(b[12:29]))
+
+	_, _, _, err := generateThumbnail(b)
+	if !errors.Is(err, errTooLarge) {
+		t.Fatalf("err = %v, want errTooLarge", err)
+	}
+}
+
+func TestGenerateThumbnail_scalesAndEncodesJPEG(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1000, 500))); err != nil {
+		t.Fatal(err)
+	}
+	data, w, h, err := generateThumbnail(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w != 320 || h != 160 {
+		t.Fatalf("size = %dx%d, want 320x160", w, h)
+	}
+	if _, format, err := image.Decode(bytes.NewReader(data)); err != nil || format != "jpeg" {
+		t.Fatalf("output decodes as %q, err %v; want jpeg", format, err)
 	}
 }

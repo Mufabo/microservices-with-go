@@ -26,7 +26,7 @@ WORKDIR /src
 # Download dependencies first, in their own layer, so this step is cached
 # and re-run only when go.mod/go.sum change — not on every source edit.
 COPY go.* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Now copy the source and build.
 COPY . .
@@ -51,7 +51,7 @@ Every line earns its place. Walking through the non-obvious ones:
 -   **`CGO_ENABLED=0`** disables cgo, producing a fully static binary with no dependency on the system C library. This is what lets us use the `distroless/static` base, which contains no libc at all. Forget this flag and you'll get a binary that builds fine but won't start in the minimal image --- a classic first-container puzzle.
 -   **`-trimpath`** strips your local filesystem paths out of the binary (so `/home/yourname/...` doesn't leak into stack traces), and **`-ldflags="-s -w"`** drops the symbol table and debug info, shaving the binary down. Together they make the artifact smaller and a touch more private.
 -   **`COPY go.* ./` then `go mod download` as a separate step** is the most important caching trick. Docker caches each layer and reuses it if its inputs are unchanged. Because dependencies change far less often than source code, downloading them in their own layer means an ordinary code change reuses the cached dependency layer and rebuilds in seconds.
--   **The `--mount=type=cache` lines** go further, persisting Go's build and module caches *across* builds (a BuildKit feature, on by default in current Docker). The first build is cold; every build after is dramatically faster.
+-   **The `--mount=type=cache` lines** go further, persisting Go's build and module caches *across* builds (a BuildKit feature, on by default in current Docker). The first build is cold; every build after is dramatically faster. Note that *both* `RUN` steps mount the module cache at `/go/pkg/mod`. A cache mount covers the directory for the duration of its step, so if `go mod download` wrote the modules into the image layer and the build step then mounted an empty cache over the same path, the build couldn't see them and would download everything again.
 -   **`gcr.io/distroless/static-debian12:nonroot`** is a Google-maintained base image that contains a CA-certificates bundle, timezone data, and `/etc/passwd` --- and nothing else. No shell, no package manager, no utilities. That's a feature: an attacker who finds a way into your container finds no tools to pivot with, and there are essentially no OS packages to accumulate vulnerabilities. The `:nonroot` tag and the `USER nonroot` line mean the process runs as an unprivileged user, never root.
 -   **The empty `/data` owned by UID 65532** (the `nonroot` user) is for Chapter 4. There, Compose mounts a *named volume* at `/data` for the images the service stores, and Docker seeds a new named volume from whatever the image has at that path, ownership included. Without this directory the volume comes up owned by root, the unprivileged service can't write to it, and every upload fails with `permission denied`. The build stage creates the directory because the distroless image has no shell to run `mkdir` in.
 -   **`ARG SERVICE=images`** parameterizes which service to build. Because every Snapvault service shares this exact Dockerfile, in Chapter 8 we'll build all five from one template by passing `--build-arg SERVICE=feed` and so on.

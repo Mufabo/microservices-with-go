@@ -7,6 +7,13 @@ resource "google_sql_database_instance" "postgres" {
   settings {
     tier = "db-custom-1-3840"
 
+    # Nightly backups plus point-in-time recovery (from the write-ahead log),
+    # the main reason to use a managed database rather than run our own.
+    backup_configuration {
+      enabled                        = true
+      point_in_time_recovery_enabled = true
+    }
+
     # The instance gets a public IP but no authorized networks, so nothing can
     # connect to it directly. The feed Pods reach it through the Cloud SQL Auth
     # Proxy sidecar, which authenticates with the runtime service account

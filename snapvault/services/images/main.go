@@ -8,6 +8,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"image"
+	_ "image/gif"  // register the decoders image.DecodeConfig uses to
+	_ "image/jpeg" // check that an upload really is a JPEG, PNG, or GIF
+	_ "image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -113,12 +117,23 @@ func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Only images go in. The format is read from the file's own header, not
+	// from the Content-Type the client claims, so an HTML page renamed to
+	// photo.jpg is refused here instead of being stored and served back.
+	_, format, err := image.DecodeConfig(file)
+	if err != nil || !allowedFormats[format] {
+		http.Error(w, "unsupported image: upload a JPEG, PNG, or GIF", http.StatusUnsupportedMediaType)
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		log.Error("rewind upload failed", "err", err)
+		http.Error(w, "invalid upload", http.StatusBadRequest)
+		return
+	}
+
 	id := newID()
 	objectName := "originals/" + id
-	contentType := hdr.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	contentType := "image/" + format
 
 	if err := s.blob.Put(r.Context(), objectName, contentType, file); err != nil {
 		log.Error("store original failed", "err", err)
@@ -161,7 +176,19 @@ func (s *server) publish(ctx context.Context, subject string, evt any) error {
 	return err
 }
 
-// serveImage streams the object at prefix+{name}, sniffing its content type.
+// allowedFormats are the image.DecodeConfig format names Snapvault accepts.
+// They are also the formats the thumbnails worker can decode.
+var allowedFormats = map[string]bool{"jpeg": true, "png": true, "gif": true}
+
+// servableTypes are the only content types serveImage ever declares.
+var servableTypes = map[string]bool{"image/jpeg": true, "image/png": true, "image/gif": true}
+
+// serveImage streams the object at prefix+{name}. It sniffs the content type,
+// but declares only an image type: anything else (such as an object stored
+// before uploads were validated) goes out as application/octet-stream, and
+// nosniff stops the browser second-guessing it. Uploaded bytes are served from
+// the gateway's own origin, so serving them as text/html would let an upload
+// run script there.
 func serveImage(blob storage.Blob, prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := prefix + r.PathValue("name")
@@ -173,9 +200,14 @@ func serveImage(blob storage.Blob, prefix string) http.HandlerFunc {
 		defer rc.Close()
 
 		buf := bufio.NewReader(rc)
+		contentType := "application/octet-stream"
 		if peek, _ := buf.Peek(512); len(peek) > 0 {
-			w.Header().Set("Content-Type", http.DetectContentType(peek))
+			if ct := http.DetectContentType(peek); servableTypes[ct] {
+				contentType = ct
+			}
 		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = io.Copy(w, buf)
 	}
