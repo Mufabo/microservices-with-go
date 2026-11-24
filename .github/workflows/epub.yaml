@@ -1,0 +1,73 @@
+name: epub
+
+# Rebuild Microservices-in-Go.epub and files/book-src.zip whenever the book
+# source changes, commit them back so neither drifts from files/, and publish
+# the EPUB as the rolling `latest` release. build.sh is reproducible, so this
+# only commits when the book actually changed, and a local build with the
+# pinned Pandoc matches CI's byte for byte. Pushes made with GITHUB_TOKEN don't
+# trigger workflows, so the commit below can't start another run.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'files/**'
+      - '!files/book-src.zip'
+      - '.github/workflows/epub.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the rebuilt outputs and manage the release
+
+concurrency:
+  group: epub
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pandoc
+        # The distro package is too old, so install the upstream .deb. The
+        # version is pinned in files/build.sh; bump it there, deliberately.
+        run: |
+          PANDOC_VERSION=$(sed -n 's/^PANDOC_VERSION=//p' files/build.sh)
+          curl -sSfLO "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          sudo apt-get install -y "./pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          rm "pandoc-${PANDOC_VERSION}-1-amd64.deb"
+
+      - name: Build the EPUB and the source bundle
+        # build.sh writes next to the sources; the published EPUB lives at the
+        # repo root, and book-src.zip stays in files/.
+        run: |
+          cd files
+          ./build.sh
+          mv Microservices-in-Go.epub ..
+
+      - name: Commit the rebuilt outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Microservices-in-Go.epub files/book-src.zip; then
+            echo "EPUB and source bundle unchanged; nothing to commit."
+            exit 0
+          fi
+          git commit -m "build: rebuild EPUB from ${GITHUB_SHA::8}" \
+            -- Microservices-in-Go.epub files/book-src.zip
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Publish the EPUB as the latest release
+        # One rolling release holds the current EPUB. Recreate it, tag
+        # included, so the tag always points at the commit that built it.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest Microservices-in-Go.epub \
+            --target "$sha" \
+            --title "Microservices in Go — current EPUB" \
+            --notes "Built from \`${sha::8}\`." \
+            --latest

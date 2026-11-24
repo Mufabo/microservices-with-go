@@ -38,7 +38,7 @@ build is reproducible: with the pinned Pandoc, the same sources always give
 byte-identical files, here and in CI. Convert onward to PDF or HTML with Pandoc
 as well, e.g. `pandoc … -o book.html`.
 
-Pushing a change under `files/` to `main` also triggers `.forgejo/workflows/epub.yaml`,
+Pushing a change under `files/` to `main` also triggers `.github/workflows/epub.yaml`,
 which runs this same script and commits the rebuilt `Microservices-in-Go.epub`
 (at the repository root) and `book-src.zip` if they changed. It also attaches
 the EPUB to the rolling `latest` release. If you commit the outputs of your own

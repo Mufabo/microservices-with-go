@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # The Pandoc release this book is built with. CI installs exactly this version
-# (.forgejo/workflows/epub.yaml reads it from this line).
+# (.github/workflows/epub.yaml reads it from this line).
 PANDOC_VERSION=3.12
 
 # A fixed timestamp for the EPUB's modification date and for every file inside
