@@ -2,3 +2,7 @@ project_id     = "my-gcp-project"
 region         = "europe-west1"
 forgejo_repo   = "example/snapvault"
 forgejo_issuer = "https://codeberg.org/api/actions"
+
+# Origins allowed to run Identity Platform sign-in: the gateway's domain (the
+# one in deploy/k8s/overlays/prod/ingress.yaml) plus localhost for development.
+auth_authorized_domains = ["localhost", "fatihmachtsachen.duckdns.org"]

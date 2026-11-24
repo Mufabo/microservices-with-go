@@ -5,10 +5,15 @@
 #
 # Before this can serve:
 #   - reserve the static IP (infra/ingress.tf, output gateway_ip),
-#   - point your domain's DNS A record at that IP (the certificate is issued only
-#     once the domain resolves to the load balancer; this takes a while),
-#   - replace snapvault.example.com below with your domain, and add it to
-#     auth_authorized_domains in Terraform so users can sign in from it.
+#   - point the domain's A record at that IP. It's a DuckDNS subdomain, so
+#     set it with DuckDNS's update URL, passing the IP explicitly (otherwise
+#     DuckDNS records the address of whatever machine makes the request):
+#       curl "https://www.duckdns.org/update?domains=fatihmachtsachen&token=$DUCKDNS_TOKEN&ip=$(terraform -chdir=infra output -raw gateway_ip)"
+#     The certificate is issued only once the domain resolves to the load
+#     balancer, which can take a while;
+#     `kubectl describe managedcertificate gateway` shows its progress.
+#   - keep the domain in auth_authorized_domains in terraform.tfvars, so users
+#     can sign in from it.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -31,7 +36,7 @@ metadata:
   name: gateway
 spec:
   domains:
-    - snapvault.example.com
+    - fatihmachtsachen.duckdns.org
 ---
 apiVersion: networking.gke.io/v1beta1
 kind: FrontendConfig
