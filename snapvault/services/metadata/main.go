@@ -116,6 +116,8 @@ func main() {
 func (s *service) handle(msg jetstream.Msg) {
 	ctx := otel.GetTextMapPropagator().Extract(context.Background(),
 		telemetry.NatsHeaderCarrier(msg.Headers()))
+	ctx, span := otel.Tracer("metadata").Start(ctx, "store metadata")
+	defer span.End()
 
 	var evt events.ImageUploaded
 	if err := json.Unmarshal(msg.Data(), &evt); err != nil {

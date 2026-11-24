@@ -85,7 +85,7 @@ resource "helm_release" "argocd" {
 }
 ```
 
-The `helm_release` resource needs the `hashicorp/helm` provider next to `google` in `providers.tf`, configured to reach the new cluster: its endpoint and CA certificate from `google_container_cluster.snapvault`, and an access token from the `google_client_config` data source. The companion repository's `infra/providers.tf` shows the full block.
+The `helm_release` resource needs the `hashicorp/helm` provider next to `google` in `providers.tf`, configured to reach the new cluster: its endpoint and CA certificate from `google_container_cluster.autopilot`, and an access token from the `google_client_config` data source. The companion repository's `infra/providers.tf` shows the full block.
 
 This gives a satisfying division of labor: Terraform provisions the cluster and installs exactly one workload into it --- ArgoCD --- and from that point on, *Git drives everything else*. Terraform's job ends where GitOps begins.
 

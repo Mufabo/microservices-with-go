@@ -72,7 +72,7 @@ We target Go 1.27 (released August 2026). Snapvault's code doesn't depend on any
 -   **The goroutine-leak profile is now generally available.** It flags goroutines blocked forever on a channel or lock --- a category of bug that distributed Go systems produce with depressing regularity --- and it's served at `/debug/pprof/goroutineleak` by `net/http/pprof`.
 -   **Methods can now declare their own type parameters.** Generic helpers can live on the type they belong to instead of floating at package level.
 
-None of these are load-bearing for the architecture; they're quality-of-life improvements. The patterns in this book work on Go 1.22+ (the first release with method-and-path routing in `http.ServeMux`); we target 1.27 to stay current.
+None of these are load-bearing for the architecture; they're quality-of-life improvements. The patterns in this book work on Go 1.23+ (1.22 brought method-and-path routing to `http.ServeMux`, and 1.23 added `Request.Pattern`, which Chapter 13's metrics use); we target 1.27 to stay current.
 
 ## The shape of the journey
 

@@ -1,15 +1,19 @@
 name: snapvault
 
-# Local development stack: the five services plus their backing systems. Only
-# the gateway is published to the host. The `restart` policy lets services that
-# start before NATS/Postgres/Mongo are ready retry until the dependency is up.
+# Local development stack: the five services plus their backing systems. The
+# gateway is published on 8080; NATS, MongoDB, and Postgres are published too
+# (4222, 27017, 5432) so you can reach them with the nats CLI, mongosh, or psql.
+# The `restart` policy lets services that start before NATS/Postgres/Mongo are
+# ready exit and retry until the dependency is up.
 
 services:
   nats:
     image: nats:2.10
-    command: ["-js"] # enable JetStream
+    command: ["-js", "-sd", "/data"] # enable JetStream, persist to /data
     ports:
       - "4222:4222"
+    volumes:
+      - nats-data:/data # streams and consumer state survive a recreate
 
   mongo:
     image: mongo:7
@@ -101,3 +105,4 @@ volumes:
   mongo-data:
   pg-data:
   blob-data:
+  nats-data:

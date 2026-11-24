@@ -50,7 +50,7 @@ func TestScaleToFit(t *testing.T) {
 
 Each case becomes a named subtest, so a failure tells you *which* shape broke, and adding a case is one line. This is the rhythm of Go testing: a slice of cases, a loop, `t.Run`. No framework, no assertions library --- and for the vast majority of tests, none is needed.
 
-Handlers are nearly as easy, because of a decision we made in Chapter 2: handlers close over a narrow interface rather than a concrete dependency. The images service's `serveImage` needs only a `storage.Blob`, so a test can hand it a fake --- an in-memory map --- and never touch a disk or a cloud. Create `services/images/handlers_test.go`:
+Handlers are nearly as easy, because of a decision we made in Chapter 2: handlers close over a narrow interface rather than a concrete dependency. The images service's `serveImage` needs only a `storage.Blob`, so a test can hand it a fake --- an in-memory map --- and never touch a disk or a cloud. Create `services/images/serve_test.go`:
 
 ``` go
 package main
@@ -253,7 +253,7 @@ import (
     "codeberg.org/example/snapvault/internal/events"
 )
 
-func TestJetStreamRoundTrip(t *testing.T) {
+func TestEnsureStream_RoundTrip(t *testing.T) {
     ctx := context.Background()
 
     container, err := natstc.Run(ctx, "nats:2.10")
@@ -310,7 +310,7 @@ func TestJetStreamRoundTrip(t *testing.T) {
 }
 ```
 
-Notice this test uses `Fetch` --- the *pull* style of consuming, where you ask for a batch of messages and get them --- rather than the *push* style (`Consume` with a callback) the services use. Pull consumers are ideal in tests because they're synchronous: you ask for one message and block until it arrives or the wait elapses, with no goroutines or channels to coordinate. Both styles consume from the same durable consumer concept; pull just hands control of the timing to the caller, which is what a test wants.
+Notice this test uses `Fetch` --- the *pull* style of consuming, where you ask for a batch of messages and get them --- rather than the callback style (`Consume`) the services use. Both are pull consumers under the hood --- `Consume` simply keeps pulling in the background and calls your function for each message --- but `Fetch` is synchronous: you ask for one message and block until it arrives or the wait elapses, with no goroutines or channels to coordinate. That hands control of the timing to the caller, which is what a test wants. (JetStream also has true *push* consumers, where the server sends messages to a subject you subscribe to; the `jetstream` package steers new code toward pull, and so does Snapvault.)
 
 ::: note
 **Testcontainers needs a Docker daemon.** These tests require Docker to be running wherever they execute --- your laptop, and the CI runner. On a self-hosted Forgejo Runner with the host's Docker socket available, they work out of the box (Chapter 8 shows the job); Codeberg's *hosted* runners deliberately don't offer Docker-in-Docker, so the integration tests need a runner you control. The first run pulls the `postgres` and `nats` images, which is slow; subsequent runs reuse the cached images and are fast. If a developer doesn't have Docker, the build tag means `go test ./...` still runs all the unit tests cleanly --- the integration tests are simply skipped.
@@ -342,6 +342,8 @@ package e2e
 import (
     "bytes"
     "encoding/json"
+    "image"
+    "image/png"
     "io"
     "mime/multipart"
     "net/http"
@@ -356,11 +358,13 @@ func TestUploadAppearsInFeed(t *testing.T) {
         t.Skip("set GATEWAY_URL to run end-to-end tests")
     }
 
-    // Upload a tiny image through the public gateway.
+    // Upload a real (blank) PNG through the public gateway.
+    var img bytes.Buffer
+    png.Encode(&img, image.NewRGBA(image.Rect(0, 0, 640, 480)))
     var body bytes.Buffer
     mw := multipart.NewWriter(&body)
     part, _ := mw.CreateFormFile("image", "test.png")
-    part.Write(onePixelPNG()) // a minimal valid PNG, defined elsewhere
+    part.Write(img.Bytes())
     mw.WriteField("owner", "e2e")
     mw.Close()
 

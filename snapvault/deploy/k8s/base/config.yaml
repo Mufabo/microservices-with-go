@@ -11,7 +11,9 @@ data:
   METADATA_URL: "http://metadata:8080"
   FEED_URL: "http://feed:8080"
   LOG_LEVEL: "info"
-# Secrets (DATABASE_URL, MONGO_URI) are NOT in git or in the cluster. feed and
+# GOOGLE_CLOUD_PROJECT (which turns on trace export) is set per environment
+# in the overlay. Secrets (DATABASE_URL, MONGO_URI) are NOT in git or in the
+# cluster. feed and
 # metadata mount them from Secret Manager through GKE's Secret Manager add-on
 # (overlays/prod/secretproviderclass.yaml) and read them via DATABASE_URL_FILE
 # and MONGO_URI_FILE. ../../infra declares the secrets and grants access; their

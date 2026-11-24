@@ -207,7 +207,7 @@ go func() {
 }()
 ```
 
-`consuming` is an `int32` the worker sets to `1` once `cons.Consume(...)` is established and back to `0` if the consumer stops, so readiness reflects whether the worker is actually attached to the stream. Now the thumbnails Deployment can carry the same liveness and readiness probes as everything else, pointed at port `8081`. Its manifest looks like the images one but with no `Service` --- nothing calls a worker over the network --- and the probe ports set to `8081`:
+`consuming` is an `int32` the worker sets to `1` once `cons.Consume(...)` is established, and back to `0` from a goroutine that waits on the consume context's `Closed()` channel, which closes if consumption stops (say, the durable consumer is deleted). So readiness reflects whether the worker is actually attached to the stream. Now the thumbnails Deployment can carry the same liveness and readiness probes as everything else, pointed at port `8081`. Its manifest looks like the images one but with no `Service` --- nothing calls a worker over the network --- and the probe ports set to `8081`:
 
 ``` yaml
 apiVersion: apps/v1

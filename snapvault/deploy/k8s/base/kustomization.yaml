@@ -12,3 +12,4 @@ resources:
   - metadata.yaml
   - feed.yaml
   - networkpolicy.yaml
+  - podmonitoring.yaml

@@ -20,7 +20,7 @@ type Blob interface {
 	// Get opens the object at key for reading. The caller must Close it.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	// Put stores r at key with the given content type, overwriting any
-	// existing object. It returns only after the write is durable.
+	// existing object. It returns nil only once the write has completed.
 	Put(ctx context.Context, key, contentType string, r io.Reader) error
 }
 
@@ -73,9 +73,12 @@ func (d *diskBlob) Put(_ context.Context, key, _ string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, r)
-	return err
+	if _, err := io.Copy(f, r); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Close can report a failed write (a full disk, say), so its error counts.
+	return f.Close()
 }
 
 // ---- Google Cloud Storage ----

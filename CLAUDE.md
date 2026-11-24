@@ -19,6 +19,7 @@ go test -run TestName ./services/thumbnails/  # single unit test
 go test -tags=integration ./...               # integration tests; needs Docker (Testcontainers starts Postgres/NATS)
 go test -tags=integration -run TestEnsureStream_RoundTrip ./internal/platform/messaging/natsutil/   # single integration test
 docker compose up --build                     # full local stack; gateway on localhost:8080
+GATEWAY_URL=http://localhost:8080 go test -tags=e2e ./test/e2e/...   # end-to-end, against a running stack
 docker build --build-arg SERVICE=images -t snapvault/images .   # SERVICE: gateway|images|thumbnails|metadata|feed
 deploy/k8s/check-images.sh                    # renders the prod overlay; fails on an unmapped placeholder image
 GOTOOLCHAIN=go1.27.2 go run golang.org/x/vuln/cmd/govulncheck@latest ./...   # vuln scan; set GOTOOLCHAIN to the newest patch release

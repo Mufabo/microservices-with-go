@@ -31,9 +31,10 @@ images:
     newTag: latest
 
 patches:
-  # Environment-specific bucket, and the Identity Platform project whose ID
+  # Environment-specific bucket, the Identity Platform project whose ID
   # tokens the gateway accepts (the `auth_issuer`/`auth_audience` Terraform
-  # outputs). Without these the gateway refuses to start.
+  # outputs; without these the gateway refuses to start), and the project
+  # traces are exported to.
   - target: { kind: ConfigMap, name: snapvault-config }
     patch: |-
       - op: add
@@ -44,6 +45,11 @@ patches:
         value: https://securetoken.google.com/PROJECT_ID
       - op: add
         path: /data/AUTH_AUDIENCE
+        value: PROJECT_ID
+      # Turns on the Cloud Trace exporter (telemetry.Init); unset, the
+      # services run with tracing off.
+      - op: add
+        path: /data/GOOGLE_CLOUD_PROJECT
         value: PROJECT_ID
   # Point the feed's Cloud SQL Auth Proxy at this environment's instance
   # (the `cloudsql_connection_name` Terraform output).

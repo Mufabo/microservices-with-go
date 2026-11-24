@@ -1,0 +1,28 @@
+# Managed Service for Prometheus scrapes /metrics from every Snapvault Pod.
+# The four HTTP services serve it on their main port; the thumbnails worker
+# serves it on its health port. (The images NetworkPolicy already admits the
+# collectors in gmp-system.)
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: snapvault-http
+spec:
+  selector:
+    matchExpressions:
+      - { key: app, operator: In, values: [gateway, images, metadata, feed] }
+  endpoints:
+    - port: 8080
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: snapvault-thumbnails
+spec:
+  selector:
+    matchLabels: { app: thumbnails }
+  endpoints:
+    - port: 8081
+      path: /metrics
+      interval: 30s

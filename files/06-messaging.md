@@ -182,9 +182,11 @@ func (d diskBlob) Put(_ context.Context, key, _ string, r io.Reader) error {
     if err != nil {
         return err
     }
-    defer f.Close()
-    _, err = io.Copy(f, r)
-    return err
+    if _, err := io.Copy(f, r); err != nil {
+        _ = f.Close()
+        return err
+    }
+    return f.Close()
 }
 
 type gcsBlob struct {
@@ -265,9 +267,9 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
         }
         data, _ := json.Marshal(evt)
         if _, err := js.Publish(r.Context(), events.SubjectUploaded, data); err != nil {
-            log.Error("publish uploaded", "id", id, "err", err)
-            http.Error(w, "stored but not announced", http.StatusInternalServerError)
-            return
+            // Stored but not announced: see the warning below. The original
+            // is safe, so log loudly rather than fail the upload.
+            log.Error("publish uploaded failed", "id", id, "err", err)
         }
 
         w.Header().Set("Content-Type", "application/json")
@@ -282,7 +284,7 @@ func uploadImage(blobs storage.Blob, js jetstream.JetStream, log *slog.Logger) h
 Publishing to a JetStream stream blocks until the broker has *persisted* the message and acknowledged it, so a successful `Publish` means the event is durably stored and will be delivered even if every consumer is currently down. The user's upload is complete and announced; the rest of the system will catch up on its own schedule.
 
 ::: warning
-**The two-write problem.** This handler does two things that can fail independently: it writes the blob, then publishes the event. If the process dies between them, the original exists but no one was told --- an orphan. Truly bulletproof solutions (the *transactional outbox* pattern) record the intent to publish in the same transaction as the write and relay it afterward. For Snapvault we accept the small window and rely on it being rare and recoverable (a periodic reconciliation job could find originals with no feed entry). The lesson is to *know* where your gaps are; every distributed system has them, and pretending otherwise is how they bite.
+**The two-write problem.** This handler does two things that can fail independently: it writes the blob, then publishes the event. If the publish fails, or the process dies between them, the original exists but no one was told --- an orphan. (Returning an error to the client instead wouldn't help: a retry would store a *second* original, and the first would still be orphaned.) Truly bulletproof solutions (the *transactional outbox* pattern) record the intent to publish in the same transaction as the write and relay it afterward. For Snapvault we accept the small window and rely on it being rare and recoverable (a periodic reconciliation job could find originals with no feed entry). The lesson is to *know* where your gaps are; every distributed system has them, and pretending otherwise is how they bite.
 :::
 
 ## The thumbnails worker

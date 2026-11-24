@@ -17,6 +17,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel"
 
 	"codeberg.org/example/snapvault/internal/events"
@@ -35,9 +37,23 @@ type worker struct {
 	log  *slog.Logger
 }
 
-// consuming is 1 once the consumer is attached; readiness reflects it so a
-// worker that has lost its consumer reports "not ready".
+// consuming is 1 while the consumer is attached and drops to 0 if consumption
+// stops (for example, the durable consumer was deleted), so readiness reports
+// a worker that is no longer processing anything.
 var consuming int32
+
+// Worker metrics (Chapter 13). Queue depth comes from the NATS exporter, not
+// from here; these say how fast the work that does arrive gets done.
+var (
+	thumbsProcessed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "thumbnails_processed_total",
+		Help: "Thumbnails successfully generated.",
+	})
+	thumbDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "thumbnail_seconds",
+		Help: "Time to decode, resize, and encode one image.",
+	})
+)
 
 func main() {
 	log := svclog.New("thumbnails")
@@ -95,6 +111,11 @@ func main() {
 	}
 	defer cc.Stop()
 	atomic.StoreInt32(&consuming, 1)
+	go func() {
+		<-cc.Closed()
+		atomic.StoreInt32(&consuming, 0)
+		log.Error("consumer stopped; reporting not ready")
+	}()
 	log.Info("thumbnailer consuming", "subject", events.SubjectUploaded)
 
 	// Health-only listener for Kubernetes probes (the worker serves no
@@ -143,7 +164,9 @@ func (w *worker) handle(msg jetstream.Msg) {
 		return
 	}
 
+	start := time.Now()
 	thumb, width, height, err := generateThumbnail(original)
+	thumbDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
 		// A corrupt, unsupported, or oversized image won't succeed on retry.
 		log.Error("thumbnail generation failed; terminating", "err", err)
@@ -173,6 +196,7 @@ func (w *worker) handle(msg jetstream.Msg) {
 
 	log.Info("thumbnail generated", "object", thumbObject, "w", width, "h", height)
 	_ = msg.Ack()
+	thumbsProcessed.Inc()
 }
 
 func (w *worker) publish(ctx context.Context, subject string, evt any) error {

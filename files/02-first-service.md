@@ -127,7 +127,7 @@ Tagging every line with `"service"` means that once all five services are pourin
 
 ### A graceful HTTP server
 
-The single most common mistake in a first network service is calling `http.ListenAndServe` and walking away. When Kubernetes wants to stop your pod --- to roll out a new version, to move it to another node --- it sends `SIGTERM` and expects the process to finish in-flight requests and exit. A server that ignores the signal gets killed mid-request, dropping client connections on every single deploy. We solve this once, in `internal/platform/httpx/server.go`:
+The single most common mistake in a first network service is calling `http.ListenAndServe` and walking away. When Kubernetes wants to stop your pod --- to roll out a new version, to move it to another node --- it sends `SIGTERM` and expects the process to finish in-flight requests and exit. A server that ignores the signal gets killed mid-request, dropping client connections on every single deploy. We solve this once, in `internal/platform/httpx/httpx.go`:
 
 ``` go
 // Package httpx provides a graceful HTTP server and common handlers.

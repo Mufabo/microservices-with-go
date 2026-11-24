@@ -31,8 +31,8 @@ Building and running the single parameterized image from Chapter 3.
 
 ``` bash
 $ docker build --build-arg SERVICE=images -t snapvault/images:dev .
-$ docker run --rm -p 8080:8080 \
-    -e PORT=8080 -e STORAGE=disk snapvault/images:dev
+$ docker run --rm -p 8080:8080 --env-file images.env \
+    snapvault/images:dev                      # NATS_URL etc. in images.env
 $ docker images                               # list local images
 $ docker logs <container>                     # view logs
 $ docker exec -it <container> sh              # shell in (not distroless!)

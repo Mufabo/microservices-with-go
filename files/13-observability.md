@@ -136,21 +136,24 @@ var (
 
 The worker increments `thumbsProcessed` on each success and observes `thumbDuration` around the resize. The other number that matters for a queue-based system is **queue depth** --- JetStream's count of messages waiting for the `thumbnailer` consumer. A deep, growing backlog means the workers can't keep up. You can read it any time with `nats consumer info IMAGES thumbnailer` (the "Unprocessed Messages" line). To graph and alert on it, run the official **prometheus-nats-exporter** next to the NATS server: it scrapes the server's monitoring endpoint and exposes per-consumer pending counts as Prometheus metrics, which Managed Prometheus collects like any other. Chapter 14 discusses scaling on it.
 
-On GKE, **Google Managed Service for Prometheus** scrapes these `/metrics` endpoints for you --- no Prometheus server to run. You point it at your Pods with a `PodMonitoring` resource:
+On GKE, **Google Managed Service for Prometheus** scrapes these `/metrics` endpoints for you --- no Prometheus server to run. You point it at your Pods with a `PodMonitoring` resource. One covers the four HTTP services, which serve `/metrics` on their main port:
 
 ``` yaml
 apiVersion: monitoring.googleapis.com/v1
 kind: PodMonitoring
 metadata:
-  name: snapvault
+  name: snapvault-http
 spec:
   selector:
-    matchLabels: { app: images }
+    matchExpressions:
+      - { key: app, operator: In, values: [gateway, images, metadata, feed] }
   endpoints:
     - port: 8080
       path: /metrics
       interval: 30s
 ```
+
+A second, identical but for `matchLabels: { app: thumbnails }` and `port: 8081`, covers the worker, which serves `/metrics` next to its health endpoints. Both live in the base, beside the Deployments they watch.
 
 The scraped series land in Cloud Monitoring, where you build dashboards and alerts --- "error rate above 1% for five minutes," "p99 latency over a second" --- on the RED metrics every service now emits.
 
@@ -196,7 +199,7 @@ func Init(ctx context.Context, projectID string) (func(context.Context) error, e
 }
 ```
 
-Each service calls it first thing in `main`, with `telemetry.Init(ctx, config.String("GOOGLE_CLOUD_PROJECT", ""))`, and exits if it returns an error. The empty-project branch matters more than it looks. Without it, `texporter.New` would try to discover a project from the environment, fail on a laptop with no Google Cloud credentials, and take every service in your Compose stack down at startup. In the cluster, set `GOOGLE_CLOUD_PROJECT` and the exporter switches on; the runtime service account needs `roles/cloudtrace.agent` to write spans.
+Each service calls it first thing in `main`, with `telemetry.Init(ctx, config.String("GOOGLE_CLOUD_PROJECT", ""))`, and exits if it returns an error. The prod overlay sets `GOOGLE_CLOUD_PROJECT` in the ConfigMap; forget it and nothing fails --- the services just run without exporting a single span. The empty-project branch matters more than it looks. Without it, `texporter.New` would try to discover a project from the environment, fail on a laptop with no Google Cloud credentials, and take every service in your Compose stack down at startup. In the cluster, set `GOOGLE_CLOUD_PROJECT` and the exporter switches on; the runtime service account needs `roles/cloudtrace.agent` to write spans.
 
 The sampler keeps 10% of traces (`TraceIDRatioBased(0.1)`) but, because it's `ParentBased`, always keeps a trace whole --- if the gateway decided to sample a request, every downstream span for it is kept too. Setting the `TraceContext` propagator tells OpenTelemetry to read and write the W3C `traceparent` header.
 
@@ -250,6 +253,8 @@ ctx, span := otel.Tracer("thumbnails").Start(ctx, "generate thumbnail")
 defer span.End()
 // ... resize, upload, publish images.thumbnailed (injecting ctx again) ...
 ```
+
+The metadata and feed consumers do the same, each starting a span of its own around the database write. Without that span the extracted context would still be passed along, but nothing in those services would appear in the trace.
 
 Now Cloud Trace shows a single upload as one connected tree: the synchronous gateway-to-images leg, then --- linked, not orphaned --- the thumbnailer's work and the feed update that followed. The gap that asynchronous messaging opens for observability is closed.
 

@@ -107,7 +107,7 @@ resource "google_artifact_registry_repository" "snapvault" {
 The GKE Autopilot cluster from Chapter 9, now as code. Create `gke.tf`:
 
 ``` hcl
-resource "google_container_cluster" "snapvault" {
+resource "google_container_cluster" "autopilot" {
   name             = "snapvault"
   location         = var.region
   enable_autopilot = true
@@ -129,7 +129,7 @@ Snapvault's Pods need to read and write the GCS bucket, and they should do it wi
 
 ``` hcl
 resource "google_service_account" "runtime" {
-  account_id   = "snapvault-runtime"
+  account_id   = "snapvault"
   display_name = "Snapvault runtime service account"
 }
 
@@ -147,11 +147,11 @@ resource "google_service_account_iam_member" "workload_identity" {
 }
 ```
 
-The last resource is the magic that connects this chapter to the last one. `${project}.svc.id.goog[namespace/ksa]` names the Kubernetes service account `snapvault` in the `snapvault` namespace --- the `serviceAccountName: snapvault` we put on every Pod. Granting it `workloadIdentityUser` on the Google service account lets those Pods authenticate to Google Cloud as `snapvault-runtime`, with no key anywhere. You finish the link with one annotation on the Kubernetes side:
+The last resource is the magic that connects this chapter to the last one. `${project}.svc.id.goog[namespace/ksa]` names the Kubernetes service account `snapvault` in the `snapvault` namespace --- the `serviceAccountName: snapvault` we put on every Pod. Granting it `workloadIdentityUser` on the Google service account lets those Pods authenticate to Google Cloud as the `snapvault` Google service account, with no key anywhere. You finish the link with one annotation on the Kubernetes side:
 
 ``` bash
 $ kubectl annotate serviceaccount snapvault -n snapvault \
-    iam.gke.io/gcp-service-account=snapvault-runtime@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account=snapvault@PROJECT_ID.iam.gserviceaccount.com
 ```
 
 Now the images and thumbnails Pods reach Cloud Storage with the identity Terraform created --- the keyless access we promised in Chapter 5 finally fully wired.
@@ -222,8 +222,8 @@ output "deployer_sa" {
 The feed service needs PostgreSQL. We argued in Chapter 9 for a managed instance rather than an in-cluster StatefulSet; **Cloud SQL** is that instance, and it's a resource like any other. Create `database.tf`:
 
 ``` hcl
-resource "google_sql_database_instance" "feed" {
-  name             = "snapvault-feed"
+resource "google_sql_database_instance" "postgres" {
+  name             = "snapvault-pg"
   database_version = "POSTGRES_16"
   region           = var.region
 
@@ -244,9 +244,9 @@ resource "google_sql_database_instance" "feed" {
   deletion_protection = true
 }
 
-resource "google_sql_database" "snapvault" {
+resource "google_sql_database" "feed" {
   name     = "snapvault"
-  instance = google_sql_database_instance.feed.name
+  instance = google_sql_database_instance.postgres.name
 }
 
 # Let the runtime identity open connections through the Auth Proxy.
@@ -257,7 +257,7 @@ resource "google_project_iam_member" "runtime_cloudsql" {
 }
 
 output "cloudsql_connection_name" {
-  value = google_sql_database_instance.feed.connection_name
+  value = google_sql_database_instance.postgres.connection_name
 }
 ```
 
@@ -274,7 +274,7 @@ A database is only useful if the feed Pods can reach it, and the instance above 
           restartPolicy: Always
           args:
             - --port=5432
-            - PROJECT_ID:us-central1:snapvault-feed   # cloudsql_connection_name
+            - PROJECT_ID:us-central1:snapvault-pg   # cloudsql_connection_name
           resources:
             requests: { cpu: 100m, memory: 64Mi }
       containers:
@@ -287,7 +287,7 @@ A database is only useful if the feed Pods can reach it, and the instance above 
 The database also needs a user. Create it out of band, so the password never enters Terraform state:
 
 ``` bash
-$ gcloud sql users create snapvault --instance=snapvault-feed --password="$DB_PASSWORD"
+$ gcloud sql users create snapvault --instance=snapvault-pg --password="$DB_PASSWORD"
 ```
 
 The connection string, with that password, is a secret. Because the proxy listens inside the Pod, it reads `postgres://snapvault:PASSWORD@127.0.0.1:5432/snapvault?sslmode=disable` --- `sslmode=disable` covers only the loopback hop, and the proxy encrypts everything beyond it. Store it in **Secret Manager** so the cluster can pull it at runtime (Chapter 14) instead of carrying a hand-created Kubernetes Secret:

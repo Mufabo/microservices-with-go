@@ -30,9 +30,11 @@ func (d diskStore) Put(_ context.Context, key, _ string, r io.Reader) error {
     if err != nil {
         return err
     }
-    defer f.Close()
-    _, err = io.Copy(f, r)
-    return err
+    if _, err := io.Copy(f, r); err != nil {
+        _ = f.Close()
+        return err
+    }
+    return f.Close() // a failed write can surface only here
 }
 ```
 

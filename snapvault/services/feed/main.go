@@ -122,6 +122,8 @@ func main() {
 func (s *service) handle(msg jetstream.Msg) {
 	ctx := otel.GetTextMapPropagator().Extract(context.Background(),
 		telemetry.NatsHeaderCarrier(msg.Headers()))
+	ctx, span := otel.Tracer("feed").Start(ctx, "apply "+msg.Subject())
+	defer span.End()
 
 	switch msg.Subject() {
 	case events.SubjectUploaded:
